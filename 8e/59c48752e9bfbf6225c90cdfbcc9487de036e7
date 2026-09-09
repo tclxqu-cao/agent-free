@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-09-09-ai-hub-electron-design.md
+  s_0e2b3be5706ac6::t_c11c9f2d367c0b 1-136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "8e59c48752e9bfbf6225c90cdfbcc9487de036e7",
+  "prompts": {},
+  "sessions": {
+    "s_0e2b3be5706ac6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a084c8-e9a5-7be3-b0a6-91f5ebf9b23f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
