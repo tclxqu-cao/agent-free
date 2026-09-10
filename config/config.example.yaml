@@ -1,0 +1,51 @@
+# Job Agent 主配置（init 时复制为 config.yaml）
+home:
+  city: 苏州
+  district: 工业园区
+  lat: 31.3011        # 家的纬度（地图上取一次坐标）
+  lng: 120.7398       # 家的经度
+
+search:
+  keywords:            # 每个关键词 × 每个启用站点 = 一次搜索
+    - Java
+    - Java 架构师
+  max_per_keyword: 30  # 每次搜索最多抓取卡片数
+  fetch_detail: true   # 是否进入岗位详情页补充职责描述
+
+rules:                 # 硬过滤 + 打分规则
+  salary_min: 25       # 月薪下限（K），岗位薪资上限低于它则淘汰
+  experience_max: 10   # 岗位要求年限下限超过它则淘汰
+  education_allow:     # 允许的学历要求（岗位要求不在其中则淘汰）；留空 [] 表示不筛
+    - 不限
+    - 大专
+    - 本科
+  cities: [苏州]       # 允许的城市；留空 [] 表示不筛
+  exclude_keywords:    # 标题/公司命中即淘汰
+    - 外包
+    - 驻场
+    - 培训
+  max_distance_km: 50  # 距家最远公里数（距离未知时不淘汰）
+  expected_salary: 30  # 打分用：期望月薪中点（K）
+
+sites:                 # 启用的站点
+  - boss
+  - zhilian
+  - liepin
+  - job51
+  - lagou
+
+browser:
+  headless: true       # 登录时强制有头
+  delay: [2, 6]        # 页面动作间随机延时秒数区间
+
+llm:                   # OpenAI 兼容 API（DeepSeek/GLM 等），关闭时全链路规则降级
+  enabled: false
+  base_url: https://api.deepseek.com/v1
+  api_key: ""
+  model: deepseek-chat
+  timeout: 90
+
+amap_key: ""           # 高德 key（可选）：地址转坐标更准；不填用 OpenStreetMap + 内置区表兜底
+
+schedule:
+  at: "08:30"          # job-agent watch 的每日执行时刻

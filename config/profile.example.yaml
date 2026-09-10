@@ -1,0 +1,30 @@
+# 个人经历画像（init 时复制为 profile.yaml，供匹配打分与学习建议使用）
+name: 张三
+current_role: Java 后端工程师
+years: 6
+education: 本科
+skills:
+  - Java
+  - Spring Boot
+  - MySQL
+  - Redis
+  - Kafka
+  - 微服务
+  - 分布式
+  - Docker
+summary: >
+  6 年 Java 后端经验，主导过订单中台微服务化改造，熟悉高并发、分布式事务与稳定性保障，
+  带过 4 人小组，正在补 AI 应用开发（LangChain/RAG）。
+expectations:
+  salary_min: 30
+  cities: [苏州]
+  directions:
+    - 后端/服务端开发
+    - 架构师
+    - AI 应用开发
+target_next:        # “更上一层”的目标岗位，用于进阶差距分析
+  roles:
+    - 架构师
+    - 技术专家
+    - 技术经理
+  notes: 希望具备更大的技术决策权和跨团队影响力

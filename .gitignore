@@ -1,0 +1,17 @@
+# 数据与产物
+data/
+output/
+logs/
+*.log
+
+# 真实配置（示例配置入库）
+config/config.yaml
+config/profile.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+dist/
