@@ -1,0 +1,37 @@
+config/config.example.yaml
+  s_aab30d5e785eb8::t_fe71f3d5d4a3ee 1-51
+config/profile.example.yaml
+  s_ab394b05672978::t_ad8fe167dee21c 1-30
+src/job_agent/__init__.py
+  s_ab394b05672978::t_ce1bfa59e4c838 1-3
+src/job_agent/models.py
+  s_ab394b05672978::t_c29206a9f25c1d 1-82
+src/job_agent/normalize.py
+  s_ab394b05672978::t_da7cdf95258389 1-208
+uv.lock
+  s_ab394b05672978::t_a949f4570e0d79 1-329
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "b39b9ab88d4e8409c45fe6076385e5d7b5081f59",
+  "prompts": {},
+  "sessions": {
+    "s_aab30d5e785eb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08bc1-e69f-7573-90c8-264085123862",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    },
+    "s_ab394b05672978": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08bcd-d01d-7de3-b720-86810fa0c631",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
