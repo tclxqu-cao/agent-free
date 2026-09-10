@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-09-10-job-agent.md
+  s_aab30d5e785eb8::t_1080e008806d8e 1-163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "fe7ba1ff4de6a07cecfc47592bb4238fddd23c24",
+  "prompts": {},
+  "sessions": {
+    "s_aab30d5e785eb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08bc1-e69f-7573-90c8-264085123862",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
