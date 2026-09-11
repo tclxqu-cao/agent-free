@@ -71,9 +71,9 @@ def write_daily_report(out_dir: Path, day: str, matches: list[MatchResult],
         salary = salary_trend(db)
         skills = skill_trend(db)
         kw = keyword_trend(db)
-        exclude = ((config or {}).get("rules") or {}).get("exclude_keywords")
-        hot = hot_jobs(db, exclude=exclude)
-        new, missing = new_and_missing(db, day)
+        rules = (config or {}).get("rules") or {}
+        hot = hot_jobs(db, exclude=rules.get("exclude_keywords"))
+        new, missing = new_and_missing(db, day, rules=rules)
 
         lines += ["## 二、岗位数量趋势", "",
                   _table(["日期", "活跃", "新增", "下架"],

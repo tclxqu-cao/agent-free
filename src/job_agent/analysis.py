@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import date, timedelta
 
 from .db import DB, row_to_job
-from .normalize import extract_skills
+from .match import _hard_filter
 
 WEEK = 7
 
@@ -152,13 +152,39 @@ def hot_jobs(db: DB, days: int = 7, top_n: int = 10,
     return out[:top_n]
 
 
-def new_and_missing(db: DB, day: str | None = None) -> tuple[list, list]:
+def new_and_missing(db: DB, day: str | None = None,
+                    exclude: list[str] | None = None,
+                    rules: dict | None = None) -> tuple[list, list]:
+    """当日新增/下架岗位。展示层过滤：给定 rules 时复用匹配引擎硬过滤
+    （城市/薪资/学历/排除词/距离/年限），否则仅按 exclude 关键词。"""
     day = day or date.today().isoformat()
     new_rows = db.query("SELECT * FROM jobs WHERE first_seen = ?", (day,))
     missing_rows = db.query(
         """SELECT j.* FROM job_daily d JOIN jobs j ON d.job_id = j.job_id
            WHERE d.date = ? AND d.status = 'missing'""", (day,))
-    return [row_to_job(r) for r in new_rows], [row_to_job(r) for r in missing_rows]
+
+    if rules:
+        rules = dict(rules)
+        if exclude:
+            rules["exclude_keywords"] = sorted(
+                set(rules.get("exclude_keywords") or []) | set(exclude))
+
+    def keep(row) -> bool:
+        if not rules:
+            if not exclude:
+                return True
+            text = f"{row['title']}{row['company']}"
+            return not any(w in text for w in exclude)
+        job = row_to_job(row)
+        snap = db.query(
+            "SELECT distance_km FROM job_daily WHERE job_id=? AND distance_km IS NOT NULL "
+            "ORDER BY date DESC LIMIT 1", (job.job_id,))
+        if snap:
+            job.raw["distance_km"] = snap[0]["distance_km"]
+        return _hard_filter(job, rules) is None
+
+    return ([row_to_job(r) for r in new_rows if keep(r)],
+            [row_to_job(r) for r in missing_rows if keep(r)])
 
 
 def keyword_trend(db: DB, days: int = 30) -> list[dict]:
@@ -181,7 +207,3 @@ def requirement_drift(db: DB) -> dict:
         "experience": distribution_shift(db, "experience"),
         "skills": skill_trend(db),
     }
-
-
-def skills_in_text(text: str, vocab: list[str] | None = None) -> list[str]:
-    return extract_skills(text, vocab)

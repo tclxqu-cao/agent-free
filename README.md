@@ -102,7 +102,9 @@ llm:
 ## 测试
 
 ```bash
-uv run pytest tests/ -v      # 78 个用例：解析/匹配/趋势/存储/适配器解析/降级/端到端
+uv run pytest tests/ -v      # 单元 + 端到端：字段解析/匹配/趋势/存储/适配器解析/降级
+                             # + 浏览器级 e2e（本地 mock 招聘站真实 Chromium 全链路）
+                             # + CLI 进程级 e2e（init→demo→analyze→daily→report）
 uv run job-agent demo        # 端到端演示
 ```
 
