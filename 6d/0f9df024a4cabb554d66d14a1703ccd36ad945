@@ -1,0 +1,24 @@
+README.md
+  h_b0bf4228a0b7ec 105-107
+src/job_agent/__main__.py
+  h_b0bf4228a0b7ec 1-5
+src/job_agent/analysis.py
+  h_b0bf4228a0b7ec 10,155-159,165-187
+src/job_agent/report.py
+  h_b0bf4228a0b7ec 74-76
+tests/test_cli_e2e.py
+  h_b0bf4228a0b7ec 1-67
+tests/test_scrape_e2e.py
+  h_b0bf4228a0b7ec 1-196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6d0f9df024a4cabb554d66d14a1703ccd36ad945",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
