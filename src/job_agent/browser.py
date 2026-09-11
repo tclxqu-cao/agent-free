@@ -92,21 +92,37 @@ class BrowserSession:
             pass
 
 
-def login_flow(site_id: str, config: dict, config_path: Path) -> Path:
-    """有头浏览器手动登录一次，保存登录态。返回 storage_state 路径。"""
+def wait_for_login(site, page, timeout: float = 240.0, interval: float = 3.0) -> bool:
+    """轮询站点登录态直到成功或超时；站点检测抛错（如滑块验证）视为未登录继续等。"""
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        try:
+            if site.logged_in(page):
+                return True
+        except Exception:
+            pass
+        _time.sleep(interval)
+    return False
+
+
+def login_flow(site_id: str, config: dict, config_path: Path,
+               timeout: float = 240.0) -> Path:
+    """有头浏览器手动登录，自动检测成功后保存登录态（无需终端确认）。"""
     from .sites import get_site
 
     site = get_site(site_id, (config.get("home") or {}).get("city"))
-    print(f"[login] 打开 {site.name} 登录页，请在浏览器中完成登录（扫码/账密）...")
+    print(f"[login] 打开 {site.name} 登录页，请在浏览器中完成登录（扫码/账密），"
+          f"登录成功会自动保存（最长等待 {timeout:.0f} 秒）...")
     with BrowserSession(config, config_path, headless=False) as bs:
         page = bs.open(site_id)
         page.goto(site.login_url, wait_until="domcontentloaded")
-        input(f"[login] 登录完成后回到终端按回车保存登录态（{site_id}）> ")
-        try:
-            ok = site.logged_in(page)
-        except Exception:
-            ok = False
+        ok = wait_for_login(site, page, timeout=timeout)
         path = bs.save_state(site_id)
-        print(f"[login] 登录态已保存: {path}"
-              + ("" if ok else "（警告：登录检测未确认，若抓取提示未登录请重新执行 login）"))
+        if ok:
+            print(f"[login] ✅ {site.name} 登录成功，登录态已保存: {path}")
+        else:
+            print(f"[login] ⚠️ 等待超时未检测到登录（{timeout:.0f}s）。"
+                  f"当前状态已存到 {path}，请重新执行 login 重试。")
         return path

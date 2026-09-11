@@ -48,10 +48,9 @@ def cmd_init(args) -> None:
 def cmd_login(args) -> None:
     _ensure_config(Path(args.config_dir))
     from .browser import login_flow
-    from .models import data_dir
     config = load_config(Path(args.config_dir))
-    login_flow(args.site, config, Path(args.config_dir))
-    print(f"[login] 完成。验证：job-agent login-status")
+    login_flow(args.site, config, Path(args.config_dir), timeout=args.timeout)
+    print("[login] 完成。验证：job-agent login-status")
 
 
 def cmd_login_status(args) -> None:
@@ -196,6 +195,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = add("login", "有头浏览器手动登录某站点并保存登录态")
     p.add_argument("--site", required=True, help=SITES_HELP)
+    p.add_argument("--timeout", type=float, default=240,
+                   help="等待登录完成的秒数（默认 240）")
     p.set_defaults(func=cmd_login)
 
     p = add("login-status", "检查各站点登录态")
