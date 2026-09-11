@@ -1,0 +1,19 @@
+src/job_agent/sites/__init__.py
+  h_b0bf4228a0b7ec 49-55,58-62,64-65,76,105
+src/job_agent/browser.py
+  h_b0bf4228a0b7ec 95-100,103-116,118,130,137,139-140
+tests/test_login.py
+  h_b0bf4228a0b7ec 27-36
+  h_b0bf4228a0b7ec 9-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2456a3063617fac7825f7ac4d5576e3ee5e49728",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
