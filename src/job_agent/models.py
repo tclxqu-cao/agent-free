@@ -30,7 +30,8 @@ def load_profile(config_dir: Path) -> dict:
 
 
 def data_dir(config: dict, config_path: Path) -> Path:
-    base = Path(config.get("data_dir", config_path.parent.parent / "data"))
+    """数据目录默认与配置目录同级（repo 布局：config/ 与 data/ 并列）。"""
+    base = Path(config.get("data_dir", config_path.parent / "data"))
     base.mkdir(parents=True, exist_ok=True)
     (base / "auth").mkdir(exist_ok=True)
     (base / "dumps").mkdir(exist_ok=True)
