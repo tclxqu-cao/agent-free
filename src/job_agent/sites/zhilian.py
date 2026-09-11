@@ -29,8 +29,9 @@ class ZhilianSite(BaseSite):
     DETAIL_REQ = ".describle .describle__detail-content"
 
     def logged_in(self, page) -> bool:
+        # 智联首页/搜索页未登录时存在 *no-login* 类的登录入口；已登录则消失
         try:
-            return page.locator("a:has-text('登录'), .signin").count() == 0
+            return page.locator("[class*='no-login']").count() == 0
         except Exception:
             return True
 
