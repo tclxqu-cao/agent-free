@@ -46,12 +46,23 @@ def dump_page(config: dict, config_path: Path, site_id: str, keyword: str, page)
 
 def scrape_site_keyword(site: BaseSite, page, keyword: str, max_cards: int,
                         fetch_detail: bool, db: DB, geocoder: Geocoder,
-                        home: dict, today: str) -> int:
-    """单站点单关键词抓取入库，返回入库岗位数。异常向上抛。"""
+                        home: dict, today: str, config: dict,
+                        config_path: Path) -> int:
+    """单站点单关键词抓取入库，返回入库岗位数。异常向上抛。
+
+    extract 首次异常（如页面跳转竞态）自动重试一次；
+    0 结果时 dump 页面留证，便于自主运行期间排查选择器漂移。
+    """
     if not site.logged_in(page):
         raise RuntimeError("登录态失效，请先执行: job-agent login --site " + site.site_id)
-    cards, total = site.extract(page, keyword, max_cards)
+    try:
+        cards, total = site.extract(page, keyword, max_cards)
+    except Exception:
+        human_delay(config, 3, 6)
+        cards, total = site.extract(page, keyword, max_cards)
     db.record_keyword(today, keyword, site.site_id, total)
+    if not cards:
+        dump_page(config, config_path, site.site_id, keyword, page)
     count = 0
     for d in cards:
         job = site.parse_card_dict(d)
@@ -62,7 +73,7 @@ def scrape_site_keyword(site: BaseSite, page, keyword: str, max_cards: int,
                 job = site.detail(page, job)
             except Exception:
                 pass
-            human_delay({"browser": {"delay": [1, 2]}}, 1, 2)
+            human_delay(config, 1, 2)
         dist = compute_distance(job, geocoder, home)
         db.upsert_job(job, dist, today)
         count += 1
@@ -91,7 +102,7 @@ def scrape_all(config: dict, config_path: Path, db: DB,
                 try:
                     count = scrape_site_keyword(
                         site, page, kw, max_cards, fetch_detail,
-                        db, geocoder, home, today)
+                        db, geocoder, home, today, config, config_path)
                     db.record_run(today, site_id, kw, count, "ok")
                     stats["runs"].append({"site": site_id, "keyword": kw, "count": count})
                     stats["total_jobs"] += count

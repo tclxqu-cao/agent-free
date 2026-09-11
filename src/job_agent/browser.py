@@ -92,19 +92,32 @@ class BrowserSession:
             pass
 
 
-def wait_for_login(site, page, timeout: float = 240.0, interval: float = 3.0) -> bool:
-    """轮询站点登录态直到成功或超时；站点检测抛错（如滑块验证）视为未登录继续等。"""
+def wait_for_login(site, login_page, timeout: float = 240.0, interval: float = 3.0) -> bool:
+    """轮询检测登录态，以站点首页的 logged_in 为准（登录页元素可能天然缺失导致假阳性）。
+
+    用独立检查页访问首页，不打扰用户正在操作的登录页；
+    站点检测抛错（如滑块验证）视为未登录继续等。
+    """
     import time as _time
 
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
+    check = login_page.context.new_page()
+    try:
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            try:
+                check.goto(site.base_url, wait_until="domcontentloaded")
+                check.wait_for_timeout(1500)
+                if site.logged_in(check):
+                    return True
+            except Exception:
+                pass
+            _time.sleep(interval)
+        return False
+    finally:
         try:
-            if site.logged_in(page):
-                return True
+            check.close()
         except Exception:
             pass
-        _time.sleep(interval)
-    return False
 
 
 def login_flow(site_id: str, config: dict, config_path: Path,
@@ -114,15 +127,15 @@ def login_flow(site_id: str, config: dict, config_path: Path,
 
     site = get_site(site_id, (config.get("home") or {}).get("city"))
     print(f"[login] 打开 {site.name} 登录页，请在浏览器中完成登录（扫码/账密），"
-          f"登录成功会自动保存（最长等待 {timeout:.0f} 秒）...")
+          f"系统会持续到站点首页核验登录态，成功自动保存（最长等待 {timeout:.0f} 秒）...")
     with BrowserSession(config, config_path, headless=False) as bs:
         page = bs.open(site_id)
         page.goto(site.login_url, wait_until="domcontentloaded")
         ok = wait_for_login(site, page, timeout=timeout)
         path = bs.save_state(site_id)
         if ok:
-            print(f"[login] ✅ {site.name} 登录成功，登录态已保存: {path}")
+            print(f"[login] ✅ {site.name} 首页核验登录成功，登录态已保存: {path}")
         else:
-            print(f"[login] ⚠️ 等待超时未检测到登录（{timeout:.0f}s）。"
-                  f"当前状态已存到 {path}，请重新执行 login 重试。")
+            print(f"[login] ⚠️ 超时未在首页核验到登录（{timeout:.0f}s）。"
+                  f"当前状态已存 {path}；若抓取时报登录失效请重新执行 login。")
         return path
