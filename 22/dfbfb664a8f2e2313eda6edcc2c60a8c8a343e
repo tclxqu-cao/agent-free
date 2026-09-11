@@ -1,0 +1,14 @@
+src/job_agent/models.py
+  h_b0bf4228a0b7ec 33-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "22dfbfb664a8f2e2313eda6edcc2c60a8c8a343e",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
