@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import colorsys
 import json
+import os
 import re
 import shutil
 import struct
@@ -32,11 +33,19 @@ DEFAULT_MODELS: dict = {
               "size_map": {"16:9": "1344x768", "9:16": "768x1344",
                            "1:1": "1024x1024", "4:3": "1024x768"},
               "timeout": 120},
-    "video": {"enabled": False, "base_url": "", "api_key": "", "model": "",
+    "video": {"enabled": False, "provider": "http", "base_url": "", "api_key": "", "model": "",
               "submit_path": "/videos/generations", "poll_path": "/videos/{task_id}",
               "status_field": "status", "url_fields": "video_url,output.url,url,data[0].url",
               "done_words": "succeeded,success,completed,complete,done,finished",
-              "interval": 5, "timeout": 600, "extra": {}},
+              "interval": 5, "timeout": 600, "extra": {},
+              # provider = "hf_gradio"：调 Hugging Face Space（Gradio API，匿名免费，
+              # 依赖经 uv --with gradio_client 运行时注入，核心零依赖不变）
+              "hf_space": "Saravutw/WAN2.2_I2V_LIGHTNING_4-8step_custom",
+              "hf_api": "/generate_video",
+              "hf_token": "",
+              "hf_params": {"steps": 4, "negative_prompt": "static, blurry, low quality, distorted",
+                            "guidance_scale": 3.5, "guidance_scale_2": 3.5,
+                            "quality": 1, "flow_shift": 3, "frame_multiplier": 16}},
 }
 
 
@@ -356,23 +365,24 @@ def gen_image(vcfg: dict, prompt: str, aspect_ratio: str | None,
     if vcfg.get("enabled") and vcfg.get("base_url") and vcfg.get("api_key"):
         size = (vcfg.get("size_map") or {}).get(ratio) or "1024x1024"
         try:
-            with httpx.post(
+            # httpx 顶层 post 返回的 Response 不支持 with，直接接住
+            r = httpx.post(
                 f"{str(vcfg['base_url']).rstrip('/')}/images/generations",
                 headers={"Authorization": f"Bearer {vcfg['api_key']}"},
                 json={"model": vcfg.get("model") or "gpt-image-1",
                       "prompt": prompt, "size": size, "n": 1,
                       "response_format": "b64_json"},
                 timeout=float(vcfg.get("timeout") or 120),
-            ) as r:
-                if r.status_code >= 400 and "response_format" in (r.text or ""):
-                    r = httpx.post(  # gpt-image-1 等不接受 response_format → 去掉重试
-                        f"{str(vcfg['base_url']).rstrip('/')}/images/generations",
-                        headers={"Authorization": f"Bearer {vcfg['api_key']}"},
-                        json={"model": vcfg.get("model") or "gpt-image-1",
-                              "prompt": prompt, "size": size, "n": 1},
-                        timeout=float(vcfg.get("timeout") or 120))
-                r.raise_for_status()
-                item = (r.json().get("data") or [{}])[0]
+            )
+            if r.status_code >= 400 and "response_format" in (r.text or ""):
+                r = httpx.post(  # gpt-image-1 等不接受 response_format → 去掉重试
+                    f"{str(vcfg['base_url']).rstrip('/')}/images/generations",
+                    headers={"Authorization": f"Bearer {vcfg['api_key']}"},
+                    json={"model": vcfg.get("model") or "gpt-image-1",
+                          "prompt": prompt, "size": size, "n": 1},
+                    timeout=float(vcfg.get("timeout") or 120))
+            r.raise_for_status()
+            item = (r.json().get("data") or [{}])[0]
             if item.get("b64_json"):
                 return {"mode": "model", "data": base64.b64decode(item["b64_json"]),
                         "ext": "png", "aspect_ratio": ratio}
@@ -390,17 +400,73 @@ def gen_image(vcfg: dict, prompt: str, aspect_ratio: str | None,
 
 _DONE_RE = re.compile(r"succeeded|success|completed|complete|done|finished", re.I)
 
+_HF_SCRIPT = r"""
+import json, sys
+from gradio_client import Client, handle_file
+space, api, img, prompt, params_json, out = sys.argv[1:7]
+p = json.loads(params_json)
+p["duration_seconds"] = float(max(2.0, min(float(p.get("duration_seconds") or 3.0), 10.0)))
+p.setdefault("last_image", None)   # 可选首尾帧参数：gradio_client 也要求显式传值
+c = Client(space, verbose=False)
+res = c.predict(input_image=handle_file(img), prompt=prompt, api_name=api, **p)
+paths = [str(x) for x in (res if isinstance(res, (list, tuple)) else [res]) if x]
+video = next((x for x in paths if str(x).lower().endswith((".mp4", ".webm", ".gif"))), None)
+open(out, "w").write(json.dumps({"paths": paths, "video": video}))
+"""
+
+
+def _gen_video_hf_space(vcfg: dict, prompt: str, first_frame_bytes: bytes,
+                        duration: float, ratio: str, seed: str) -> dict:
+    """通过 gradio_client（uv 运行时注入）匿名调用 HF Space 图生视频。"""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        img = td / "first_frame.png"
+        img.write_bytes(first_frame_bytes)
+        params = dict(vcfg.get("hf_params") or {})
+        params["duration_seconds"] = duration
+        out_json = td / "result.json"
+        timeout = max(600.0, float(vcfg.get("timeout") or 600))
+        env = None
+        if vcfg.get("hf_token"):  # 免费注册的 HF token → ZeroGPU 配额大幅提高
+            env = {**os.environ, "HF_TOKEN": str(vcfg["hf_token"])}
+        r = subprocess.run(
+            ["uv", "run", "--with", "gradio_client", "--no-project", "python",
+             "-c", _HF_SCRIPT, str(vcfg.get("hf_space") or ""), str(vcfg.get("hf_api") or ""),
+             str(img), prompt, json.dumps(params), str(out_json)],
+            capture_output=True, text=True, timeout=timeout, env=env)
+        if not out_json.exists():
+            err = (r.stderr or r.stdout or "")[-300:]
+            raise RuntimeError(f"gradio_client 调用失败：{err}")
+        res = json.loads(out_json.read_text(encoding="utf-8"))
+        video_path = res.get("video")
+        if not video_path or not Path(video_path).exists():
+            raise RuntimeError(f"Space 未返回视频文件：{str(res)[:160]}")
+        return {"mode": "model", "data": Path(video_path).read_bytes(), "ext": "mp4",
+                "aspect_ratio": ratio}
+
 
 def gen_video(vcfg: dict, prompt: str, first_frame_bytes: bytes | None,
               duration: float, aspect_ratio: str | None,
               label: str, seed: str = "") -> dict:
-    """图生视频（通用两段式）：提交任务 → 轮询 → 下载。任何失败 → 占位视频。"""
+    """图生视频：provider=http 走通用两段式（提交+轮询）；provider=hf_gradio 走
+    Hugging Face Space（Gradio API 匿名调用）。任何失败 → 占位视频。"""
     ratio = _norm_aspect(aspect_ratio)
 
     def placeholder(reason: str) -> dict:
         data, ext = placeholder_video_bytes(label, ratio, duration, seed)
         return {"mode": "placeholder", "data": data, "ext": ext,
                 "aspect_ratio": ratio, "error": reason}
+
+    if str(vcfg.get("provider") or "http") == "hf_gradio":
+        if first_frame_bytes is None:
+            return placeholder("hf_gradio 模式需要首帧图")
+        try:
+            return _gen_video_hf_space(vcfg, prompt, first_frame_bytes,
+                                       duration, ratio, seed)
+        except Exception as e:  # noqa: BLE001 → 占位
+            return placeholder(f"HF Space 图生视频失败：{type(e).__name__}: {str(e)[:140]}")
 
     if not (vcfg.get("enabled") and vcfg.get("base_url") and vcfg.get("api_key")):
         return placeholder("视频模型未配置")

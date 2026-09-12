@@ -46,6 +46,34 @@ def test_placeholder_video_mp4_with_ffprobe(tmp_path):
     assert probe_duration(p) == pytest.approx(2.0, abs=0.5)
 
 
+def test_gen_video_hf_gradio_failure_falls_back_to_placeholder(monkeypatch):
+    """hf_gradio provider：Space 调用失败时回退占位，流水线不断。"""
+    import flow_studio.video as vmod
+
+    def boom(*a, **kw):
+        raise RuntimeError("space unreachable")
+
+    monkeypatch.setattr(vmod, "_gen_video_hf_space", boom)
+    cfg = {"enabled": True, "provider": "hf_gradio",
+           "hf_space": "x/y", "hf_api": "/generate_video", "timeout": 60}
+    res = gen_video(cfg, "motion", b"\x89PNG fake", 2.0, "16:9", label="S01", seed="s")
+    assert res["mode"] == "placeholder" and "失败" in res["error"]
+
+
+def test_gen_video_hf_gradio_requires_first_frame():
+    cfg = {"enabled": True, "provider": "hf_gradio", "hf_space": "x/y"}
+    res = gen_video(cfg, "motion", None, 2.0, "16:9", label="S01", seed="s")
+    assert res["mode"] == "placeholder" and "首帧" in res["error"]
+
+
+def test_video_models_video_defaults_have_provider(tmp_path):
+    from flow_studio.video import DEFAULT_MODELS as DM
+
+    vm = VideoModels(tmp_path / "v.json")
+    cfg = vm.load()["video"]
+    assert cfg["provider"] == "http" and cfg["hf_space"]
+
+
 def test_placeholder_video_gif_fallback_without_ffmpeg(tmp_path, monkeypatch):
     import flow_studio.video as vmod
 

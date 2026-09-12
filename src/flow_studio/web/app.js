@@ -1071,8 +1071,12 @@ const MODEL_FIELDS = {
   ],
   video: [
     ["enabled", "bool", "启用图生视频模型（未启用生成占位片段）"],
-    ["base_url", "text", "Base URL"],
-    ["api_key", "text", "API Key"], ["model", "text", "模型名"],
+    ["provider", "select", "提供方：http=OpenAI 风格两段式；hf_gradio=Hugging Face Space（匿名免费）", ""],
+    ["hf_space", "text", "HF Space id（hf_gradio 用，如 Saravutw/WAN2.2_I2V_LIGHTNING_4-8step_custom）"],
+    ["hf_api", "text", "Space 的 Gradio 端点（默认 /generate_video）"],
+    ["hf_token", "text", "免费 HF token（可选，大幅提高 ZeroGPU 配额）"],
+    ["base_url", "text", "Base URL（http 提供方用）"],
+    ["api_key", "text", "API Key（http 提供方用）"], ["model", "text", "模型名"],
     ["submit_path", "text", "提交任务路径"], ["poll_path", "text", "轮询路径（{task_id} 占位）"],
     ["interval", "number", "轮询间隔秒"], ["timeout", "number", "总超时秒"],
   ],
@@ -1084,12 +1088,18 @@ $("#btn-models").onclick = async () => {
   const sections = Object.entries(MODEL_FIELDS).map(([group, fields]) => `
     <h3 style="margin:14px 0 4px">${{ llm: "分镜 / 文案 LLM", image: "文生图（关键帧 / 角色设定）",
       video: "图生视频（镜头片段）" }[group]}</h3>
-    ${fields.map(([key, widget, label]) => widget === "bool"
+    ${fields.map(([key, widget, label, options]) => widget === "bool"
       ? `<div class="field"><label>${label}
            <input type="checkbox" data-mgroup="${group}" data-mkey="${key}"
              ${cfg[group]?.[key] ? "checked" : ""} style="width:auto"></label></div>`
-      : `<div class="field"><label>${label}</label>
-           <input data-mgroup="${group}" data-mkey="${key}" value="${esc(cfg[group]?.[key] ?? "")}"></div>`
+      : widget === "select"
+        ? `<div class="field"><label>${label}</label>
+           <select data-mgroup="${group}" data-mkey="${key}">
+             ${(options || ["http", "hf_gradio"]).map(o =>
+               `<option value="${esc(o)}" ${cfg[group]?.[key] === o ? "selected" : ""}>${esc(o)}</option>`).join("")}
+           </select></div>`
+        : `<div class="field"><label>${label}</label>
+             <input data-mgroup="${group}" data-mkey="${key}" value="${esc(cfg[group]?.[key] ?? "")}"></div>`
     ).join("")}`).join("");
   openModal(`
     <h2>模型设置</h2>
