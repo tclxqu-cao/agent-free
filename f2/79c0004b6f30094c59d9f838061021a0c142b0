@@ -1,0 +1,18 @@
+src/flow_studio/web/app.js
+  h_b0bf4228a0b7ec 1-1294
+src/flow_studio/web/index.html
+  h_b0bf4228a0b7ec 1-84
+src/flow_studio/web/style.css
+  h_b0bf4228a0b7ec 1-319
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f279c0004b6f30094c59d9f838061021a0c142b0",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
