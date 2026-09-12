@@ -1,0 +1,20 @@
+src/flow_studio/video.py
+  h_b0bf4228a0b7ec 16,36,40-48,368-369,376-385,403-448,453-454,462-470
+src/flow_studio/web/app.js
+  h_b0bf4228a0b7ec 1074-1079,1091,1095-1102
+src/flow_studio/web/index.html
+  h_b0bf4228a0b7ec 82
+tests/test_flow_video.py
+  h_b0bf4228a0b7ec 49-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9a717c951675eb2952e7e138b0fd8b9aa16bc077",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
