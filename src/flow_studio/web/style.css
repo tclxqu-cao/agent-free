@@ -47,17 +47,41 @@ textarea { resize: vertical; font-family: ui-monospace, "SF Mono", Menlo, monosp
 /* ---------- 主体三栏 ---------- */
 #main { flex: 1; display: flex; min-height: 0; }
 aside { background: var(--panel); z-index: 10; display: flex; flex-direction: column; min-height: 0; }
-#palette { width: 172px; border-right: 1px solid var(--line); padding: 10px; gap: 8px; overflow-y: auto; }
+#palette { width: 184px; border-right: 1px solid var(--line); padding: 12px 10px; gap: 8px; overflow-y: auto; }
 #palette h3, #inspector h3 {
   font-size: 11.5px; text-transform: uppercase; letter-spacing: .8px;
   color: var(--ink-2); margin: 4px 0 2px;
 }
 .palette-item {
-  display: flex; align-items: center; gap: 8px; padding: 7px 9px;
-  border: 1px solid var(--line); border-radius: 9px; cursor: pointer;
-  font-size: 13px; background: #fff; transition: all .15s; user-select: none;
+  display: flex; align-items: center; gap: 9px; padding: 7px 8px;
+  border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+  background: #fff; transition: all .15s; user-select: none;
+  position: relative; overflow: hidden;
 }
-.palette-item:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow); }
+.palette-item::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--pc, var(--accent)); opacity: 0; transition: opacity .15s;
+}
+.palette-item:hover, .palette-item:focus-visible {
+  border-color: var(--pc-line, var(--accent));
+  background: var(--pc-soft, var(--accent-soft));
+  transform: translateY(-1px); box-shadow: var(--shadow);
+}
+.palette-item:hover::before, .palette-item:focus-visible::before { opacity: 1; }
+.palette-item .ico-chip {
+  width: 30px; height: 30px; border-radius: 9px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; color: var(--pc, var(--ink));
+  background: var(--pc-soft, #f1f5f9); border: 1px solid var(--pc-line, var(--line));
+}
+.palette-item .lbl {
+  display: flex; flex-direction: column; min-width: 0;
+  font-size: 13px; font-weight: 600; line-height: 1.25;
+}
+.palette-item .lbl small {
+  font-weight: 400; font-size: 10.5px; color: var(--ink-2); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .palette-item .ico { width: 20px; text-align: center; }
 .palette-note { font-size: 11.5px; color: var(--ink-2); line-height: 1.6; margin-top: 4px; }
 
@@ -183,10 +207,15 @@ aside { background: var(--panel); z-index: 10; display: flex; flex-direction: co
 
 /* ---------- 节点面板分组 ---------- */
 .palette-group {
+  display: flex; align-items: center; gap: 7px;
   font-size: 11px; color: var(--ink-2); letter-spacing: .6px;
-  margin: 10px 0 5px; padding-top: 8px; border-top: 1px dashed var(--line);
+  margin: 12px 0 6px; padding-top: 10px; border-top: 1px dashed var(--line);
 }
 .palette-group:first-child { border-top: 0; margin-top: 2px; padding-top: 0; }
+.palette-group::before {
+  content: ""; width: 6px; height: 6px; border-radius: 99px; background: var(--accent);
+}
+.palette-group[data-g="video"]::before { background: #db2777; }
 
 /* ---------- 方位编辑器（角色节点） ---------- */
 .views-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
@@ -242,7 +271,7 @@ video.media-thumb { background: #000; }
 
 /* ---------- 运行面板（底部抽屉） ---------- */
 #run-panel {
-  position: absolute; left: 172px; right: 316px; bottom: 0; max-height: 260px;
+  position: absolute; left: 184px; right: 316px; bottom: 0; max-height: 260px;
   background: var(--panel); border-top: 1px solid var(--line); z-index: 15;
   display: none; flex-direction: column; box-shadow: 0 -6px 18px rgba(15, 23, 42, .07);
 }

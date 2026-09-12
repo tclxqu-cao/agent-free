@@ -1246,14 +1246,26 @@ const PALETTE_GROUPS = [
   ["基础", ["start", "end", "brain", "llm", "agent", "condition", "intent", "template", "http"]],
   ["视频制作", ["storyboard", "character", "keyframe", "shot_video", "merge_video", "asset"]],
 ];
+const PALETTE_DESC = {
+  start: "流程入口与输入变量", end: "流程出口，产出回复", brain: "交给 AgentRoam 推理",
+  llm: "大模型文本生成", agent: "调用已注册的能力", condition: "表达式选分支",
+  intent: "话术意图分流", template: "渲染文本模板", http: "发起 HTTP 请求",
+  storyboard: "剧情 → 分镜表", character: "多方位角色设定图", keyframe: "逐镜生成首帧图",
+  shot_video: "关键帧图生视频", merge_video: "ffmpeg 合成长片", asset: "引用素材库",
+};
 function renderPalette() {
   $("#palette-list").innerHTML = PALETTE_GROUPS.map(([title, types]) => {
     const items = types.filter(t => state.nodeTypes[t]).map(t => {
       const m = state.nodeTypes[t];
-      return `<div class="palette-item" data-type="${t}">
-        <span class="ico" style="color:${m.color}">${m.icon}</span>${m.label}</div>`;
+      const c = m.color || "#64748b";
+      return `<div class="palette-item" data-type="${t}" tabindex="0"
+        style="--pc:${c}; --pc-soft:${c}1c; --pc-line:${c}45"
+        title="${esc(m.desc || "")}">
+        <span class="ico-chip">${m.icon || "•"}</span>
+        <span class="lbl">${esc(m.label || t)}<small>${esc(PALETTE_DESC[t] || "")}</small></span>
+      </div>`;
     }).join("");
-    return items ? `<h4 class="palette-group">${title}</h4>${items}` : "";
+    return items ? `<h4 class="palette-group"${title === "视频制作" ? ' data-g="video"' : ""}>${title}</h4>${items}` : "";
   }).join("");
   $$("#palette-list .palette-item").forEach(el => el.onclick = () => addNode(el.dataset.type));
 }
