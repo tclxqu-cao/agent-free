@@ -1,0 +1,36 @@
+src/flow_studio/__init__.py
+  h_b0bf4228a0b7ec 1-8
+src/flow_studio/adapters.py
+  h_b0bf4228a0b7ec 1-189
+src/flow_studio/bridge.py
+  h_b0bf4228a0b7ec 1-98
+src/flow_studio/builtin_flows.py
+  h_b0bf4228a0b7ec 1-261
+src/flow_studio/engine.py
+  h_b0bf4228a0b7ec 1-338
+src/flow_studio/graph.py
+  h_b0bf4228a0b7ec 1-291
+src/flow_studio/intent.py
+  h_b0bf4228a0b7ec 1-203
+src/flow_studio/llm.py
+  h_b0bf4228a0b7ec 1-42
+src/flow_studio/registry.py
+  h_b0bf4228a0b7ec 1-44
+src/flow_studio/server.py
+  h_b0bf4228a0b7ec 1-318
+src/flow_studio/store.py
+  h_b0bf4228a0b7ec 1-110
+src/flow_studio/template.py
+  h_b0bf4228a0b7ec 1-233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "25d572da110662d873da26e59ae6e3fd96036eed",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
