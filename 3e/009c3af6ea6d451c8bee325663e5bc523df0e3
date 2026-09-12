@@ -1,0 +1,22 @@
+config/config.example.yaml
+  h_b0bf4228a0b7ec 48-52
+deploy/com.jobagent.daily.plist
+  h_b0bf4228a0b7ec 1-36
+pyproject.toml
+  h_b0bf4228a0b7ec 4,12-17,20,30
+scripts/install_launchd.sh
+  h_b0bf4228a0b7ec 1-32
+uv.lock
+  h_b0bf4228a0b7ec 5-22,45-53,63-78,221-226,234,238,240,282-398,491-503,512-536
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3e009c3af6ea6d451c8bee325663e5bc523df0e3",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
