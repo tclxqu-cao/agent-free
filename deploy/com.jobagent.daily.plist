@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：由 scripts/install_launchd.sh 渲染安装（__REPO_ROOT__ 会被替换为仓库根目录）。
+     每天 08:30 自动执行 job-agent daily（抓取→分析→建议→日报）；
+     合盖错过时点，唤醒后补跑一次。日志：logs/launchd.log -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jobagent.daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV_BIN__</string>
+        <string>run</string>
+        <string>job-agent</string>
+        <string>daily</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__REPO_ROOT__/logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_ROOT__/logs/launchd.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

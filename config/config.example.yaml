@@ -45,6 +45,11 @@ llm:                   # OpenAI 兼容 API（DeepSeek/GLM 等），关闭时全�
   model: deepseek-chat
   timeout: 90
 
+agent_bridge:          # Flow Studio「我的 Agent」节点：调本机 AgentRoam 的推理接口
+  base_url: "http://127.0.0.1:3000"   # customer-agent webapp 地址
+  token: ""                            # 远程鉴权 token（本机访问留空）
+  timeout: 300                         # agent 推理超时秒（带工具会较慢）
+
 amap_key: ""           # 高德 key（可选）：地址转坐标更准；不填用 OpenStreetMap + 内置区表兜底
 
 schedule:
