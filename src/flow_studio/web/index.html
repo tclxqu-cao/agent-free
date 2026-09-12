@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Flow Studio · Agent 编排画布</title>
+<link rel="stylesheet" href="style.css?v=7">
+</head>
+<body>
+
+<header id="topbar">
+  <button id="btn-palette" class="mobile-only" title="节点面板">＋节点</button>
+  <div class="brand"><span class="mark">◆</span> Flow Studio</div>
+  <select id="flow-select" title="选择流程"></select>
+  <button id="btn-new" title="新建空白流程">新建</button>
+  <button id="btn-del" class="danger" title="删除当前流程">删除</button>
+  <span class="sep"></span>
+  <button id="btn-save" class="primary" title="保存流程（⌘S）">保存</button>
+  <button id="btn-run" class="primary" title="运行当前流程">▶ 运行</button>
+  <span id="run-status"></span>
+  <button id="btn-models" title="配置分镜 LLM / 文生图 / 图生视频模型">模型</button>
+  <button id="btn-media" title="素材库：上传 / 预览 / 删除素材">素材库</button>
+  <button id="btn-insp" class="mobile-only" title="属性面板">属性</button>
+  <div class="spacer"></div>
+  <div id="chat-box" title="意图触发：自动路由到最匹配的流程并执行">
+    <input id="chat-input" placeholder="说一句话，触发一个流程，如：跑一下应聘demo">
+    <button id="chat-send" class="primary">触发</button>
+  </div>
+</header>
+
+<div id="main">
+  <aside id="palette">
+    <button id="palette-close" class="drawer-close mobile-only" title="收起">×</button>
+    <h3>节点</h3>
+    <div id="palette-list"></div>
+    <div class="palette-note">点击节点类型添加到画布；从右侧圆点拖到目标节点连线；条件/意图节点的连线双击可改分支。</div>
+  </aside>
+
+  <div id="canvas-wrap">
+    <div id="world">
+      <svg id="edges" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+    <div id="canvas-hint">拖拽空白处平移 · 滚轮缩放 · Delete 删除选中 · ⌘S 保存</div>
+    <div id="zoom-controls">
+      <button id="btn-zoom-out" class="canvas-fab zoom-fab" title="缩小">−</button>
+      <span id="zoom-label" title="当前缩放">100%</span>
+      <button id="btn-zoom-in" class="canvas-fab zoom-fab" title="放大">＋</button>
+      <button id="btn-fit" class="canvas-fab" title="适配屏幕">⤢ 适配</button>
+    </div>
+    <canvas id="minimap" width="176" height="110" title="小地图：点击/拖动跳转视角"></canvas>
+
+    <div id="run-panel">
+      <div class="rp-head">
+        <span id="rp-title">运行结果</span>
+        <span id="rp-status"></span>
+        <button id="rp-close">收起</button>
+      </div>
+      <div id="rp-list"></div>
+    </div>
+  </div>
+
+  <aside id="inspector">
+    <button id="insp-close" class="drawer-close mobile-only" title="收起">×</button>
+    <div id="insp-body"></div>
+  </aside>
+
+  <aside id="media-panel">
+    <button id="media-close" class="drawer-close" title="收起">×</button>
+    <h3>素材库</h3>
+    <div id="media-toolbar">
+      <div id="media-filters"></div>
+      <button id="media-upload-btn" class="primary">⬆ 上传素材</button>
+      <input id="media-upload-input" type="file" multiple accept="image/*,video/*,audio/*" hidden>
+    </div>
+    <div id="media-grid"></div>
+  </aside>
+</div>
+
+<div id="modal-mask"><div class="modal" id="modal"></div></div>
+<div id="toast"></div>
+
+<script src="app.js?v=7"></script>
+</body>
+</html>
