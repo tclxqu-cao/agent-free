@@ -1,0 +1,50 @@
+config/config.example.yaml
+  h_b0bf4228a0b7ec 53-59
+src/flow_studio/README.md
+  h_b0bf4228a0b7ec 64-142
+src/flow_studio/agentrt.py
+  h_b0bf4228a0b7ec 1-385
+src/flow_studio/engine.py
+  h_b0bf4228a0b7ec 10,68-69,75-82,101,108,142,145-153,205-207,285-411
+src/flow_studio/evals.py
+  h_b0bf4228a0b7ec 1-301
+src/flow_studio/graph.py
+  h_b0bf4228a0b7ec 86-148
+src/flow_studio/knowledge.py
+  h_b0bf4228a0b7ec 1-200
+src/flow_studio/llm.py
+  h_b0bf4228a0b7ec 43-97
+src/flow_studio/mcp_client.py
+  h_b0bf4228a0b7ec 1-205
+src/flow_studio/memory.py
+  h_b0bf4228a0b7ec 1-83
+src/flow_studio/observability.py
+  h_b0bf4228a0b7ec 1-269
+src/flow_studio/server.py
+  h_b0bf4228a0b7ec 15,19,22-26,28,31,57-78,92-110,264-530,601-632
+src/flow_studio/skills.py
+  h_b0bf4228a0b7ec 1-130
+src/flow_studio/tools.py
+  h_b0bf4228a0b7ec 1-198
+src/flow_studio/web/app.js
+  h_b0bf4228a0b7ec 12,25-39,154,156-157,198-213,295,438-440,455,476,671,679,690,772-881,1072-1076,1078,1081-1082,1328-2150,2227-2229,2231-2233,2237-2238,2240-2242,2274-2280,2300-2301
+src/flow_studio/web/index.html
+  h_b0bf4228a0b7ec 6-7,11-23,42-55,60,92-124,128
+src/flow_studio/web/style.css
+  h_b0bf4228a0b7ec 1-5,7-30,35,37-38,41,44,46-47,49-59,62-74,76-100,102,105-106,110,113,116-117,121-122,126,130,137-138,149-150,152,155-158,163-164,169-171,174,176-193,197,200-203,205-216,218-228,232-235,239,243-245,247-249,251-252,269-270,272-273,277-279,284,289,296-299,302,304,306,312,316,320,333,336,339-341,343,347,350,356,358,360,373-378,383,385,389-391,393,395,397-400,402-403,405,414,418,433-589
+tests/fixtures/mcp_echo_server.py
+  h_b0bf4228a0b7ec 1-61
+tests/test_flow_platform.py
+  h_b0bf4228a0b7ec 1-711
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6a9c0c3b64c86034061c6142ed1da431a182718e",
+  "prompts": {},
+  "humans": {
+    "h_b0bf4228a0b7ec": {
+      "author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
