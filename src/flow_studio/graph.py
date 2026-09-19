@@ -84,6 +84,69 @@ NODE_TYPES: dict[str, dict] = {
                  {"key": "optional", "widget": "bool", "label": "失败时降级跳过",
                   "default": False}],
     },
+    # ---------------- 智能体平台 ----------------
+    "ai_agent": {
+        "label": "智能体", "icon": "✨", "color": "#8b5cf6",
+        "desc": "运行一个可创建的智能体（自带提示词 + 知识库/技能/工具/MCP/记忆绑定），"
+                "工具循环推理后输出 {text, steps, tool_calls, session_id}",
+        "form": [{"key": "message", "widget": "textarea", "label": "发给智能体的话（模板）",
+                  "default": "{{input.message}}", "rows": 6},
+                 {"key": "session_id", "widget": "text", "label": "会话 ID（留空=每次新会话）",
+                  "default": ""},
+                 {"key": "required", "widget": "bool", "label": "失败时中断流程",
+                  "default": False}],
+    },
+    "kb": {
+        "label": "知识库", "icon": "📚", "color": "#b45309",
+        "desc": "在选定的知识库里全文检索，输出 {text（拼接片段）, chunks[], count}",
+        "form": [{"key": "query", "widget": "textarea", "label": "检索问题（模板）",
+                  "default": "{{input.message}}", "rows": 3},
+                 {"key": "top_k", "widget": "number", "label": "返回片段数", "default": 5}],
+    },
+    "memory": {
+        "label": "记忆", "icon": "💾", "color": "#0f766e",
+        "desc": "读写长期记忆（键值存储）。session 作用域按会话隔离，global 全局共享；"
+                "输出 {value/items/ok, text}",
+        "form": [{"key": "op", "widget": "select", "label": "操作",
+                  "options": ["get", "set", "search", "list", "delete"], "default": "get"},
+                 {"key": "scope", "widget": "select", "label": "作用域",
+                  "options": ["session", "global"], "default": "session"},
+                 {"key": "session_id", "widget": "text", "label": "会话 ID（session 作用域用，模板）",
+                  "default": "{{vars.run_id}}"},
+                 {"key": "key", "widget": "text", "label": "Key（get/set/delete 用，模板）",
+                  "default": ""},
+                 {"key": "value", "widget": "textarea", "label": "Value（set 用，模板；JSON 自动解析）",
+                  "default": "", "rows": 3},
+                 {"key": "query", "widget": "text", "label": "搜索词（search 用，模板）",
+                  "default": ""}],
+    },
+    "skill": {
+        "label": "技能", "icon": "🛠", "color": "#c026d3",
+        "desc": "加载技能指令（SKILL.md）。prompt 留空只输出指令内容；"
+                "填了则用技能指令作为 system 调 LLM，输出 {instructions, text}",
+        "form": [{"key": "prompt", "widget": "textarea", "label": "交给 LLM 的话（模板，可空）",
+                  "default": "", "rows": 5},
+                 {"key": "required", "widget": "bool", "label": "LLM 失败时中断流程",
+                  "default": False}],
+    },
+    "mcp": {
+        "label": "MCP", "icon": "🔌", "color": "#dc2626",
+        "desc": "调用 MCP 服务器（stdio）的工具，输出 {text, json?}；"
+                "服务器在「资源库 → MCP」里配置",
+        "form": [{"key": "arguments", "widget": "json", "label": "工具参数（值支持 {{模板}}）",
+                  "default": "{}"},
+                 {"key": "timeout", "widget": "number", "label": "超时秒", "default": 120},
+                 {"key": "optional", "widget": "bool", "label": "失败时降级跳过",
+                  "default": False}],
+    },
+    "tool": {
+        "label": "工具", "icon": "🧰", "color": "#4f46e5",
+        "desc": "调用内置工具（HTTP / 计算 / 时间 / 知识库 / 记忆 / 技能…），输出工具返回的 dict",
+        "form": [{"key": "arguments", "widget": "json", "label": "工具参数（值支持 {{模板}}）",
+                  "default": "{}"},
+                 {"key": "optional", "widget": "bool", "label": "失败时降级跳过",
+                  "default": False}],
+    },
     # ---------------- 视频制作 ----------------
     "storyboard": {
         "label": "分镜", "icon": "🎬", "color": "#db2777",

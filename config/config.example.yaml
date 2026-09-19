@@ -50,6 +50,13 @@ agent_bridge:          # Flow Studio「我的 Agent」节点：调本机 AgentRo
   token: ""                            # 远程鉴权 token（本机访问留空）
   timeout: 300                         # agent 推理超时秒（带工具会较慢）
 
+observability:         # Flow Studio 可观测性：执行 trace 上报 Langfuse（不配则不上报）
+  langfuse:
+    enabled: false
+    host: https://cloud.langfuse.com
+    public_key: ""
+    secret_key: ""
+
 amap_key: ""           # 高德 key（可选）：地址转坐标更准；不填用 OpenStreetMap + 内置区表兜底
 
 schedule:

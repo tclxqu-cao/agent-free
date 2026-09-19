@@ -7,6 +7,7 @@ namespace 供下游模板/条件引用。RunResult 保留逐节点状态供画�
 from __future__ import annotations
 
 import datetime as dt
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -64,12 +65,21 @@ class RunResult:
 class FlowRunner:
     def __init__(self, registry: AgentRegistry | None = None,
                  llm_cfg: dict | None = None, bridge_cfg: dict | None = None,
-                 media=None, vmodels=None):
+                 media=None, vmodels=None, kb=None, memory=None, skills=None,
+                 mcp=None, tools=None, ai_agents=None, agent_rt=None, obs=None):
         self.registry = registry or AgentRegistry()
         self.llm_cfg = llm_cfg or {}
         self.bridge_cfg = bridge_cfg or {}
         self.media = media          # AssetStore（视频节点用，可空）
         self.vmodels = vmodels      # VideoModels（视频节点用，可空）
+        self.kb = kb                # KBStore（知识库节点，可空）
+        self.memory = memory        # MemoryStore（记忆节点，可空）
+        self.skills = skills        # SkillStore（技能节点，可空）
+        self.mcp = mcp              # MCPManager（MCP 节点，可空）
+        self.tools = tools          # ToolRegistry（工具节点，可空）
+        self.ai_agents = ai_agents  # AgentStore（智能体节点，可空）
+        self.agent_rt = agent_rt    # AgentRuntime（智能体节点执行器，可空）
+        self.obs = obs              # 可观测性 observer（None = 不上报）
 
     # ---------------------------------------------------------------- 主流程
     def run(self, graph: FlowGraph, inputs: dict | None = None) -> RunResult:
@@ -88,12 +98,14 @@ class FlowRunner:
             result.status = "failed"
             result.error = "缺少开始节点"
             result.finished_at = dt.datetime.now().isoformat(timespec="seconds")
+            self._observe(result)
             return result
 
         queue: list[str] = [start_node.id]
         run_counts: dict[str, int] = {}
         steps = 0
         outputs: dict[str, dict] = {}   # node_id → output dict
+        self._result = result           # 供节点处理器读取 run 上下文（如 run_id）
 
         while queue:
             steps += 1
@@ -127,7 +139,17 @@ class FlowRunner:
 
         result.finished_at = dt.datetime.now().isoformat(timespec="seconds")
         result.started_at = result.started_at  # 保留
+        self._observe(result)
         return result
+
+    def _observe(self, result: RunResult) -> None:
+        """可观测性上报（Langfuse 等），任何故障不影响流程结果。"""
+        if self.obs is None:
+            return
+        try:
+            self.obs.flow_run(result.to_dict())
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------------------------------------------------------- 选路
     def _next_nodes(self, graph: FlowGraph, node: Node, ns: dict) -> list[str]:
@@ -180,6 +202,9 @@ class FlowRunner:
                 "condition": self._run_condition, "template": self._run_template,
                 "http": self._run_http, "intent": self._run_intent,
                 "brain": self._run_brain,
+                "ai_agent": self._run_ai_agent, "kb": self._run_kb,
+                "memory": self._run_memory, "skill": self._run_skill,
+                "mcp": self._run_mcp, "tool": self._run_tool,
                 "storyboard": self._run_video_node, "character": self._run_video_node,
                 "keyframe": self._run_video_node, "shot_video": self._run_video_node,
                 "merge_video": self._run_video_node, "asset": self._run_video_node,
@@ -256,6 +281,133 @@ class FlowRunner:
                 raise RuntimeError(f"我的 Agent 推理失败：{e}")
             raise _SkipNode(f"我的 Agent 推理失败，已降级：{e}")
         return {**out, "text": out.get("text", "")}
+
+    # ---------------- 智能体平台节点 ----------------
+    def _run_ai_agent(self, node: Node, ns: dict) -> dict:
+        if self.ai_agents is None or self.agent_rt is None:
+            raise ValueError("智能体运行时未初始化")
+        agent_id = str(node.params.get("ai_agent_id") or "").strip()
+        agent = self.ai_agents.get(agent_id)
+        if agent is None:
+            raise ValueError(f"智能体不存在：{agent_id}（资源库中创建后可选择）")
+        message = render(node.params.get("message") or "{{input.message}}", ns).strip()
+        if not message:
+            raise ValueError("智能体节点消息为空")
+        session_id = render(str(node.params.get("session_id") or ""), ns).strip()
+        run_id = getattr(self, "_result", None) and self._result.run_id
+        out = self.agent_rt.run(agent, message, session_id=session_id or None,
+                                flow_run_id=run_id)
+        if out.get("error"):
+            if node.params.get("required"):
+                raise RuntimeError(f"智能体执行失败：{out['error']}")
+            raise _SkipNode(f"智能体执行失败，已降级：{out['error']}")
+        return {"text": out.get("text", ""),
+                "steps": out.get("steps", [])[:20],
+                "tool_calls": out.get("tool_calls", 0),
+                "session_id": out.get("session_id", "")}
+
+    def _run_kb(self, node: Node, ns: dict) -> dict:
+        if self.kb is None:
+            raise ValueError("知识库未初始化")
+        kb_ids = node.params.get("kb_ids") or []
+        query = render(node.params.get("query") or "{{input.message}}", ns).strip()
+        if not query:
+            raise ValueError("知识库节点的检索问题为空")
+        chunks = self.kb.search(query, kb_ids=[str(k) for k in kb_ids] or None,
+                                top_k=int(node.params.get("top_k") or 5))
+        text = "\n\n".join(f"【{c['name']}】{c['text']}" for c in chunks)
+        return {"text": text, "count": len(chunks), "chunks": chunks}
+
+    def _run_memory(self, node: Node, ns: dict) -> dict:
+        if self.memory is None:
+            raise ValueError("记忆存储未初始化")
+        op = str(node.params.get("op") or "get")
+        kind = str(node.params.get("scope") or "session")
+        if kind == "session":
+            scope = "session:" + (render(str(node.params.get("session_id")
+                                                or "{{vars.run_id}}"), ns).strip()
+                                  or ns.get("vars", {}).get("run_id", ""))
+        else:
+            scope = "global"
+        if op == "set":
+            raw = node.params.get("value")
+            value = render(str(raw or ""), ns)
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            out = self.memory.set(scope, render(str(node.params.get("key") or ""), ns),
+                                  value)
+            return {**out, "text": json.dumps(out.get("value"), ensure_ascii=False)}
+        if op == "get":
+            val = self.memory.get(scope, render(str(node.params.get("key") or ""), ns))
+            return {"value": val,
+                    "text": "" if val is None else json.dumps(val, ensure_ascii=False)}
+        if op == "search":
+            items = self.memory.list(scope=None if kind == "global" else scope,
+                                     q=render(str(node.params.get("query") or ""), ns))
+            return {"items": items, "text": "\n".join(
+                f"{it['key']}: {json.dumps(it['value'], ensure_ascii=False)}"
+                for it in items)}
+        if op == "list":
+            items = self.memory.list(scope=None if kind == "global" else scope)
+            return {"items": items, "text": "\n".join(
+                f"{it['key']}: {json.dumps(it['value'], ensure_ascii=False)}"
+                for it in items)}
+        if op == "delete":
+            ok = self.memory.delete(scope,
+                                    render(str(node.params.get("key") or ""), ns))
+            return {"ok": ok, "text": "已删除" if ok else "键不存在"}
+        raise ValueError(f"未知记忆操作：{op}")
+
+    def _run_skill(self, node: Node, ns: dict) -> dict:
+        if self.skills is None:
+            raise ValueError("技能库未初始化")
+        skill_id = str(node.params.get("skill_id") or "").strip()
+        skill = self.skills.get(skill_id)
+        if skill is None:
+            raise ValueError(f"技能不存在：{skill_id}（资源库中创建后可选择）")
+        out: dict = {"name": skill["name"], "instructions": skill["content"]}
+        prompt = render(node.params.get("prompt") or "", ns).strip()
+        if not prompt:
+            return {**out, "text": skill["content"]}
+        text = llm_chat(self.llm_cfg, skill["content"], prompt)
+        if text is None:
+            if node.params.get("required"):
+                raise RuntimeError("技能 LLM 调用失败（required=true）")
+            raise _SkipNode("技能 LLM 未启用或调用失败，已降级跳过")
+        return {**out, "text": text}
+
+    def _run_mcp(self, node: Node, ns: dict) -> dict:
+        if self.mcp is None:
+            raise ValueError("MCP 未配置")
+        server = str(node.params.get("server") or "").strip()
+        tool = str(node.params.get("tool") or "").strip()
+        if not server or not tool:
+            raise ValueError("MCP 节点未选择服务器或工具")
+        args = render_deep(node.params.get("arguments") or {}, ns)
+        try:
+            out = self.mcp.call(server, tool, args,
+                                timeout=float(node.params.get("timeout") or 120))
+        except Exception as e:
+            if node.params.get("optional"):
+                raise _SkipNode(f"MCP 调用失败已降级：{e}") from e
+            raise
+        return {**out, "arguments": args}
+
+    def _run_tool(self, node: Node, ns: dict) -> dict:
+        if self.tools is None:
+            raise ValueError("工具注册表未初始化")
+        name = str(node.params.get("tool") or "").strip()
+        if not name:
+            raise ValueError("工具节点未选择工具")
+        args = render_deep(node.params.get("arguments") or {}, ns)
+        try:
+            return self.tools.call(name, args)
+        except Exception as e:
+            if node.params.get("optional"):
+                raise _SkipNode(f"工具调用失败已降级：{e}") from e
+            raise
 
     def _run_video_node(self, node: Node, ns: dict) -> dict:
         from . import video_nodes

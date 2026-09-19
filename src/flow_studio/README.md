@@ -61,6 +61,85 @@ uv run flow-studio              # 启动画布 http://127.0.0.1:8788 并自动�
 
 「我的 Agent」节点在 `config/config.yaml` 的 `agent_bridge` 段配置（默认 `http://127.0.0.1:3000`，无需 key——推理由你自己的 agent 完成）。
 
+## 智能体平台（资源库）
+
+概念模型（对齐 Dify）：**Agent 是中心资产**——知识库 / 记忆 / 技能 / 工具 / MCP
+都是配对给智能体的能力；**画布（流程）是智能体的一种编排方式**。顶栏「资源库」：
+**智能体 / 知识库 / 技能 / MCP / 记忆 / 评测** 六个标签页管理全部资产。
+
+### 智能体（可创建的 Agent 资产）
+
+创建/编辑智能体按分区配置（Dify 式）：
+
+- **身份**：名称 / 描述 / System 提示词；
+- **编排方式**：`对话式`（ReAct 工具循环，模型自主检索与调工具）或
+  `流程编排`（绑定一条画布流程作为执行策略——invoke 按流程逐步执行，
+  流程里可再用「智能体」节点组装多智能体，嵌套最深 3 层防打穿）；
+- **能力配对**：知识库（自动 RAG + 检索片段数）/ 技能 / 工具 / MCP；
+- **记忆与执行**：长期记忆开关、工具循环最大步数。
+
+画布 **✨ 智能体** 节点选择一个智能体作为步骤调用（自带其全部能力），输出
+`{text, steps, tool_calls, session_id}`，steps 保留 RAG 检索与每次工具调用轨迹。
+「▶ 调试运行」可直接对话测试。内置示例 **知识助手**（kb-assistant）。
+LLM 未启用时按节点「失败时中断流程」开关降级跳过或中断。
+
+- RAG：绑定了知识库的智能体，**每次对话自动检索 top-k 片段注入 system**（不依赖模型主动调工具），步骤里记 `[rag] kb_rag` 一条。
+- 记忆：开启后按 `agent:<id>` / `session:<id>` 作用域读写，会话末尾自动存最近一轮对话。
+
+### 知识库 / 记忆 / 技能 / MCP / 工具
+
+| 能力 | 说明 |
+|---|---|
+| 知识库 📚 | 文档入库自动分块，SQLite FTS5 中文检索（CJK bigram 索引 + bm25）。画布 **知识库节点**（`{text, chunks[]}`）与智能体 RAG 共用；面板支持粘贴文本 / 上传 .md .txt 等 / 检索测试 |
+| 记忆 💾 | 作用域键值存储（`session:<id>` / `global`）。画布 **记忆节点** 支持 get/set/search/list/delete；面板可浏览/写入/删除 |
+| 技能 🛠 | SKILL.md 风格指令包（frontmatter name/description + Markdown 正文），`data/skills/`。画布 **技能节点**：prompt 留空输出指令原文，填了则用技能指令做 system 调 LLM |
+| MCP 🔌 | stdio 客户端（纯 Python，JSON-RPC 换行帧）。面板配置服务器（command/args/env，如 `npx -y @modelcontextprotocol/server-filesystem /dir`），可列出工具测试连通；画布 **MCP 节点** 直接调用 |
+| 工具 🧰 | 内置工具注册表（`http_request` / `now` / `calc` / `kb_search` / `memory_save` / `memory_load` / `memory_search` / `load_skill` / `list_skills`），画布 **工具节点** 调用，也供智能体 function-calling 使用 |
+
+## 评测中心
+
+「资源库 → 评测」：**标准问题集 × 多目标执行 → 自动校验 + 对比分析**，定位不同
+agent 在哪类问题上出问题。
+
+- **评测集**：标准问题 + 期望（`contains` / `not_contains` / `regex`，可选 LLM 评判标准）。内置「基础能力冒烟」（算术 / 改写 / 指令遵循）。
+- **目标**：`platform`（平台智能体，有完整执行步骤轨迹）、`cli`（任意命令行 agent——内置 Codex `codex exec` 与 Claude `claude -p` 预设，`{prompt}` 占位）、`http`（POST `{message}` 的 chat 端点）。
+- **运行**：逐用例 × 逐目标执行，记录答案、**执行步骤**、逐条校验明细、耗时、错误。
+- **对比**：两次运行逐用例 side-by-side，结论不一致的用例高亮 `⚡ diff`，一眼看出哪个目标在哪道题上挂了、答案差在哪。
+
+```bash
+curl -X POST http://127.0.0.1:8788/api/evals/suites/smoke/run -H 'Content-Type: application/json' \
+  -d '{"targets":[{"type":"platform","id":"kb-assistant"},{"type":"cli","key":"codex","name":"Codex","command":"codex","args":["exec","--skip-git-repo-check","{prompt}"]}]}'
+curl "http://127.0.0.1:8788/api/evals/compare?run_a=<id1>&run_b=<id2>"
+```
+
+其余平台 API：智能体（`/api/ai-agents` CRUD + `/invoke`）、知识库（`/api/kb`、文档、`/search`）、
+记忆（`/api/memory`）、技能（`/api/skills`）、MCP（`/api/mcp`、`/tools`、`/call`）、
+工具清单（`/api/tools`）、评测（`/api/evals/suites|runs|compare`）。
+
+## 可观测性（Langfuse）
+
+`config.yaml` 打开开关后，所有执行数据自动上报 [Langfuse](https://langfuse.com)（零重依赖，
+直连 ingestion API，后台线程批量发送，**上报失败绝不影响流程执行**）：
+
+```yaml
+observability:
+  langfuse:
+    enabled: true
+    host: https://cloud.langfuse.com        # 或自建实例
+    public_key: pk-lf-...
+    secret_key: sk-lf-...
+```
+
+（也可用环境变量 `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`。）
+
+上报内容与映射：
+
+| 平台事件 | Langfuse 对象 | 说明 |
+|---|---|---|
+| 流程 run | trace + 每节点 span | 输入/输出、状态、耗时；失败节点 `level=ERROR`，降级节点 `WARNING` |
+| 智能体执行 | trace | RAG 检索与工具调用为 span，**LLM 调用为 generation（含 prompt/响应与 token 用量）** |
+| 评测结果 | 每用例×目标一个 trace + `eval_pass` score | 在 Langfuse 看板直接统计通过率、按目标/用例对比 |
+
 ## 「我的 agent」接入（意图触发）
 
 外部 agent（如 AgentRoam 桌面端）两种接法：

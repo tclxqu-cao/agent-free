@@ -3,14 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Flow Studio · Agent 编排画布</title>
-<link rel="stylesheet" href="style.css?v=8">
+<title>Flow Studio · 智能体平台</title>
+<link rel="stylesheet" href="style.css?v=14">
 </head>
 <body>
 
-<header id="topbar">
+<!-- 全局导航：智能体是核心，工作流（画布）是编排工具 -->
+<header id="global-nav">
+  <div class="brand"><span class="mark">◆</span><span class="brand-name">Flow Studio</span></div>
+  <nav class="nav-tabs">
+    <button id="nav-agents" class="on">智能体</button>
+    <button id="nav-flows">工作流画布</button>
+  </nav>
+  <div class="spacer"></div>
+  <button id="btn-res" title="知识库 / 技能 / MCP / 记忆 / 评测">资源库</button>
+</header>
+
+<!-- 工作流画布视图的工具栏（仅在画布视图显示） -->
+<header id="topbar" class="view-hidden">
   <button id="btn-palette" class="mobile-only" title="节点面板">＋节点</button>
-  <div class="brand"><span class="mark">◆</span> Flow Studio</div>
   <select id="flow-select" title="选择流程"></select>
   <button id="btn-new" title="新建空白流程">新建</button>
   <button id="btn-del" class="danger" title="删除当前流程">删除</button>
@@ -28,12 +39,25 @@
   </div>
 </header>
 
-<div id="main">
+<!-- 智能体主页（默认视图） -->
+<section id="agents-view">
+  <div id="agents-hero">
+    <div>
+      <h1>智能体</h1>
+      <p>知识库、记忆、技能、工具、MCP 都配对在智能体身上；对话式或流程编排任选。画布里的「智能体」节点可以把它们组装进更大的流程。</p>
+    </div>
+    <button id="agents-new" class="primary">＋ 创建智能体</button>
+  </div>
+  <div id="agents-grid"></div>
+</section>
+
+<!-- 工作流画布视图 -->
+<div id="main" class="view-hidden">
   <aside id="palette">
     <button id="palette-close" class="drawer-close mobile-only" title="收起">×</button>
     <h3>节点</h3>
     <div id="palette-list"></div>
-    <div class="palette-note">点击节点类型添加到画布；从右侧圆点拖到目标节点连线；条件/意图节点的连线双击可改分支。</div>
+    <div class="palette-note">知识库 / 记忆 / 技能是<b>智能体的能力</b>，在「资源库」中配对；画布用「智能体」节点调用它。<br>点击节点类型添加到画布；拖端口连线；条件/意图连线双击改分支。</div>
   </aside>
 
   <div id="canvas-wrap">
@@ -63,22 +87,44 @@
     <button id="insp-close" class="drawer-close mobile-only" title="收起">×</button>
     <div id="insp-body"></div>
   </aside>
-
-  <aside id="media-panel">
-    <button id="media-close" class="drawer-close" title="收起">×</button>
-    <h3>素材库</h3>
-    <div id="media-toolbar">
-      <div id="media-filters"></div>
-      <button id="media-upload-btn" class="primary">⬆ 上传素材</button>
-      <input id="media-upload-input" type="file" multiple accept="image/*,video/*,audio/*" hidden>
-    </div>
-    <div id="media-grid"></div>
-  </aside>
 </div>
+
+<!-- 智能体对话面板 -->
+<aside id="chat-panel">
+  <button id="chatp-close" class="drawer-close" title="关闭">×</button>
+  <div id="chatp-head">
+    <span id="chatp-ico">✨</span>
+    <div class="chatp-title"><b id="chatp-name">—</b><span id="chatp-mode" class="chip"></span></div>
+    <button id="chatp-new" title="清空并开始新会话">新会话</button>
+  </div>
+  <div id="chatp-msgs"></div>
+  <div id="chatp-input-row">
+    <textarea id="chatp-input" rows="1" placeholder="输入消息，Enter 发送"></textarea>
+    <button id="chatp-send" class="primary">发送</button>
+  </div>
+</aside>
+
+<aside id="media-panel">
+  <button id="media-close" class="drawer-close" title="收起">×</button>
+  <h3>素材库</h3>
+  <div id="media-toolbar">
+    <div id="media-filters"></div>
+    <button id="media-upload-btn" class="primary">⬆ 上传素材</button>
+    <input id="media-upload-input" type="file" multiple accept="image/*,video/*,audio/*" hidden>
+  </div>
+  <div id="media-grid"></div>
+</aside>
+
+<aside id="res-panel">
+  <button id="res-close" class="drawer-close" title="收起">×</button>
+  <h3>资源库</h3>
+  <div id="res-tabs"></div>
+  <div id="res-body"></div>
+</aside>
 
 <div id="modal-mask"><div class="modal" id="modal"></div></div>
 <div id="toast"></div>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

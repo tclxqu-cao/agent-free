@@ -9,7 +9,7 @@
 "use strict";
 
 /* ================= 全局状态 ================= */
-const NODE_W = 188, NODE_H_DEFAULT = 58, CULL_MARGIN = 320;
+const NODE_W = 224, NODE_H_DEFAULT = 58, CULL_MARGIN = 320;
 /* 阻止 iOS Safari 的页面级捏合/双击缩放：双指手势只留给画布（缩放流程图） */
 ["gesturestart", "gesturechange", "gestureend"].forEach(t =>
   document.addEventListener(t, e => e.preventDefault()));
@@ -22,6 +22,21 @@ const state = {
   dirty: false,
   mediaAssets: [],        // 素材库
   mediaKind: "",          // 素材过滤
+  // ---- 资源库（智能体平台） ----
+  resTab: "kb",           // kb / skills / mcp / memory / evals
+  aiAgents: [],           // 可创建的智能体
+  kbs: [],                // 知识库
+  kbDocs: {},             // kb_id → 文档列表（懒加载）
+  skillList: [],          // 技能
+  mcpCfg: { servers: {} },// MCP 服务器配置
+  mcpTools: {},           // server → 工具列表（懒加载）
+  toolList: [],           // 内置工具
+  memScope: "",           // 记忆面板当前作用域
+  evalView: null,         // null=列表 | {mode:'run', run_id} | {mode:'compare'}
+  viewMode: "agents",     // agents（默认主页）/ flows（画布）
+  chatTarget: null,       // 对话中的智能体 id
+  chatSessions: {},       // agent_id → session_id
+  chatLog: {},            // agent_id → [{role, text, steps?, error?}]
 };
 const $ = (q, el = document) => el.querySelector(q);
 const $$ = (q, el = document) => [...el.querySelectorAll(q)];
@@ -136,9 +151,10 @@ function buildNodeEl(n) {
   el.dataset.id = n.id;
   el.style.left = `${n.pos?.x ?? 0}px`; el.style.top = `${n.pos?.y ?? 0}px`;
   const sub = nodeSub(n);
+  const c = meta.color || "#888";
   el.innerHTML = `
-    <div class="type-dot" style="background:${meta.color || "#888"}"></div>
-    <div class="node-head"><span class="ico">${meta.icon || "•"}</span>
+    <div class="type-dot" style="background:${c}"></div>
+    <div class="node-head"><span class="ico-chip" style="background:${c}14;color:${c}">${meta.icon || "•"}</span>
       <span class="title">${esc(n.label || meta.label || n.id)}</span>
       <button class="del" title="删除节点">×</button></div>
     <div class="node-sub" title="${esc(sub)}">${esc(sub)}</div>
@@ -179,6 +195,22 @@ function nodeSub(n) {
       const keys = (p.inputs || []).map(i => i.key || i).filter(Boolean);
       return keys.length ? `输入: ${keys.join(", ")}` : "无输入参数";
     }
+    case "ai_agent": {
+      const a = state.aiAgents.find(x => x.id === p.ai_agent_id);
+      if (!a) return p.ai_agent_id || "未选择智能体";
+      return a.flow_id ? `${a.name} · 流程:${a.flow_id}` : `${a.name} · 对话式`;
+    }
+    case "kb": {
+      const ids = p.kb_ids || [];
+      return `查 ${ids.length ? ids.join(", ") : "全部知识库"} · top ${p.top_k || 5}`;
+    }
+    case "memory": return `${p.op || "get"} · ${p.scope || "session"}${p.key ? ` · ${p.key}` : ""}`;
+    case "skill": {
+      const s = state.skillList.find(x => x.id === p.skill_id);
+      return s ? s.name : (p.skill_id || "未选择技能");
+    }
+    case "mcp": return `${p.server || "?"} / ${p.tool || "?"}`;
+    case "tool": return p.tool || "未选择工具";
     default: return "";
   }
 }
@@ -260,6 +292,7 @@ function closeDrawers() {
   $("#palette").classList.remove("open");
   $("#inspector").classList.remove("open");
   $("#media-panel").classList.remove("open");
+  $("#res-panel").classList.remove("open");
 }
 function scheduleFrame() {
   if (frameQueued) return;
@@ -402,7 +435,9 @@ function fitView() {
     maxY = Math.max(maxY, (n.pos?.y ?? 0) + h);
   }
   const vw = wrap.clientWidth, vh = wrap.clientHeight;
-  const s = Math.min(1.2, Math.max(0.2, Math.min(
+  if (vw < 40 || vh < 40) return;   // 视图隐藏时尺寸为 0，等切换时再适配
+  // 缩放下限 0.7：流程再长，节点也不会缩到看不清
+  const s = Math.min(1.1, Math.max(0.7, Math.min(
     (vw - pad * 2) / Math.max(1, maxX - minX),
     (vh - pad * 2) / Math.max(1, maxY - minY))));
   state.view = { s, x: (vw - (maxX - minX) * s) / 2 - minX * s,
@@ -417,7 +452,7 @@ function drawMinimap() {
   const cv = $("#minimap"), ctx = cv.getContext("2d");
   const ns = state.graph?.nodes || [];
   ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.fillStyle = "rgba(15,23,42,.78)";
+  ctx.fillStyle = "#16181d";
   ctx.fillRect(0, 0, cv.width, cv.height);
   if (!ns.length) return;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -438,7 +473,7 @@ function drawMinimap() {
   }
   // 视口框
   const r = wrap.getBoundingClientRect(), v = state.view;
-  ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "#8b98f8"; ctx.lineWidth = 1.5;
   ctx.strokeRect(tx(-v.x / v.s), ty(-v.y / v.s), r.width / v.s * k, r.height / v.s * k);
   cv._nav = { minX, minY, k, ox: ox + pad * k, oy: oy + pad * k };
 }
@@ -633,6 +668,7 @@ function renderNodeForm(box) {
   const intentFields = n.type === "intent" ? intentFieldHtml(n) : "";
   const viewsFields = viewsFieldHtml(n);
   const assetFields = assetFieldHtml(n);
+  const platformFields = platformFieldHtml(n);
   box.innerHTML = `
     <span class="badge" style="background:${meta.color || "#888"}">${meta.icon || ""} ${meta.label || n.type}</span>
     <div class="palette-note" style="margin:0 0 6px">${esc(meta.desc || "")}</div>
@@ -640,6 +676,7 @@ function renderNodeForm(box) {
     ${fields}
     ${agentFields}
     ${intentFields}
+    ${platformFields}
     ${viewsFields}
     ${assetFields}
     <div class="btn-row"><button id="n-del" class="danger">删除节点</button></div>
@@ -650,6 +687,7 @@ function renderNodeForm(box) {
   if (n.type === "intent") bindIntentEditor(n);
   if (n.type === "character") bindViewsEditor(n);
   if (n.type === "asset") bindAssetSelect(n);
+  bindPlatformFields(n);
   $("#n-del").onclick = () => deleteNode(n.id);
 }
 
@@ -729,6 +767,116 @@ function actionParamsHint(agent, action) {
   if (!a || !a.params.length) return "该能力无必填参数。";
   return "参数：" + a.params.map(p =>
     `${p.key}${p.required ? "*" : ""}（${p.type || "string"}）${p.description ? " — " + p.description : ""}`).join("；");
+}
+
+/* ================= 智能体平台节点编辑器（智能体/知识库/技能/MCP/工具） ================= */
+function platformFieldHtml(n) {
+  const p = n.params || {};
+  if (n.type === "ai_agent") {
+    const opts = state.aiAgents.map(a =>
+      `<option value="${esc(a.id)}" ${a.id === p.ai_agent_id ? "selected" : ""}>
+        ${esc(a.name)}（${esc(a.id)}）</option>`).join("");
+    const cur = state.aiAgents.find(a => a.id === p.ai_agent_id);
+    return `
+      <div class="field"><label>选择智能体（资源库中创建/编辑）</label>
+        <select id="ai-agent-select">${opts || '<option value="">（暂无智能体）</option>'}</select>
+        <button id="ai-agent-open" type="button" style="margin-top:5px">管理智能体 →</button>
+        ${cur ? `<div class="hint">${esc(cur.description || "")}
+          · 绑定：${[...(cur.kb_ids || []).map(x => "知识库:" + x),
+                    ...(cur.skill_ids || []).map(x => "技能:" + x),
+                    ...(cur.tool_ids || []).map(x => "工具:" + x),
+                    ...(cur.mcp_servers || []).map(x => "MCP:" + x)].join("、") || "无"}
+          ${cur.memory ? " · 记忆开" : ""}</div>` : ""}</div>`;
+  }
+  if (n.type === "kb") {
+    const ids = p.kb_ids || [];
+    const boxes = state.kbs.map(k =>
+      `<label class="res-kv"><input type="checkbox" data-kbid="${esc(k.id)}"
+        ${ids.includes(k.id) ? "checked" : ""} style="width:auto">
+        ${esc(k.name)}（${k.docs} 文档）</label>`).join("");
+    return `
+      <div class="field"><label>检索范围（不勾 = 全部知识库）</label>
+        <div>${boxes || '<span class="hint">暂无知识库，可在「资源库 → 知识库」创建</span>'}</div>
+        <button id="kb-open" type="button" style="margin-top:5px">管理知识库 →</button></div>`;
+  }
+  if (n.type === "skill") {
+    const opts = state.skillList.map(s =>
+      `<option value="${esc(s.id)}" ${s.id === p.skill_id ? "selected" : ""}>
+        ${esc(s.name)}（${esc(s.id)}）</option>`).join("");
+    return `
+      <div class="field"><label>选择技能（资源库中创建/编辑）</label>
+        <select id="skill-select">${opts || '<option value="">（暂无技能）</option>'}</select>
+        <button id="skill-open" type="button" style="margin-top:5px">管理技能 →</button></div>`;
+  }
+  if (n.type === "mcp") {
+    const servers = Object.keys(state.mcpCfg.servers || {});
+    const srvOpts = servers.map(s =>
+      `<option value="${esc(s)}" ${s === p.server ? "selected" : ""}>${esc(s)}</option>`).join("");
+    const curSrv = p.server && servers.includes(p.server) ? p.server : servers[0];
+    const tools = curSrv ? (state.mcpTools[curSrv] || []) : [];
+    const toolOpts = tools.map(t =>
+      `<option value="${esc(t.name)}" ${t.name === p.tool ? "selected" : ""}>
+        ${esc(t.name)} — ${esc((t.description || "").slice(0, 40))}</option>`).join("");
+    return `
+      <div class="field"><label>MCP 服务器</label>
+        <select id="mcp-server">${srvOpts || '<option value="">（未配置）</option>'}</select>
+        <button id="mcp-open" type="button" style="margin-top:5px">配置 MCP →</button></div>
+      <div class="field"><label>工具 ${tools.length ? "" : "（选择服务器后加载）"}</label>
+        <select id="mcp-tool">${toolOpts || '<option value="">—</option>'}</select>
+        <div class="hint" id="mcp-schema">${mcpSchemaHint(tools, p.tool)}</div></div>`;
+  }
+  if (n.type === "tool") {
+    const opts = state.toolList.map(t =>
+      `<option value="${esc(t.name)}" ${t.name === p.tool ? "selected" : ""}>
+        ${esc(t.name)} — ${esc(t.description)}</option>`).join("");
+    return `
+      <div class="field"><label>选择工具</label>
+        <select id="tool-select">${opts || '<option value="">（无工具）</option>'}</select></div>`;
+  }
+  return "";
+}
+function mcpSchemaHint(tools, name) {
+  const t = tools.find(x => x.name === name);
+  const props = t?.parameters?.properties;
+  if (!props || !Object.keys(props).length) return "该工具无参数或未声明。";
+  return "参数：" + Object.entries(props).map(([k, v]) =>
+    `${k}${(t.parameters.required || []).includes(k) ? "*" : ""}（${v.type || "any"}）${v.description ? " — " + v.description : ""}`).join("；");
+}
+function bindPlatformFields(n) {
+  const p = n.params || {};
+  if (n.type === "ai_agent") {
+    const sel = $("#ai-agent-select");
+    if (sel) sel.onchange = () => { p.ai_agent_id = sel.value; refreshNodeEl(n); markDirty(); };
+    $("#ai-agent-open")?.addEventListener("click", () => openResPanel("agents"));
+  }
+  if (n.type === "kb") {
+    $$('#insp-body [data-kbid]').forEach(cb => cb.onchange = () => {
+      const ids = new Set(p.kb_ids || []);
+      cb.checked ? ids.add(cb.dataset.kbid) : ids.delete(cb.dataset.kbid);
+      p.kb_ids = [...ids]; refreshNodeEl(n); markDirty();
+    });
+    $("#kb-open")?.addEventListener("click", () => openResPanel("kb"));
+  }
+  if (n.type === "skill") {
+    const sel = $("#skill-select");
+    if (sel) sel.onchange = () => { p.skill_id = sel.value; refreshNodeEl(n); markDirty(); };
+    $("#skill-open")?.addEventListener("click", () => openResPanel("skills"));
+  }
+  if (n.type === "mcp") {
+    const srv = $("#mcp-server");
+    if (srv) srv.onchange = async () => {
+      p.server = srv.value; p.tool = "";
+      await ensureMcpTools(p.server);
+      renderInspector();
+    };
+    const toolSel = $("#mcp-tool");
+    if (toolSel) toolSel.onchange = () => { p.tool = toolSel.value; refreshNodeEl(n); markDirty(); };
+    $("#mcp-open")?.addEventListener("click", () => openResPanel("mcp"));
+  }
+  if (n.type === "tool") {
+    const sel = $("#tool-select");
+    if (sel) sel.onchange = () => { p.tool = sel.value; refreshNodeEl(n); markDirty(); };
+  }
 }
 
 /* ================= 意图清单编辑器 ================= */
@@ -875,12 +1023,10 @@ function fmtJson(v) { try { return JSON.stringify(v, null, 2); } catch { return 
 
 /* ================= 运行状态高亮 ================= */
 function applyBadge(el, r) {
-  const colors = { success: "var(--ok)", failed: "var(--err)", skipped: "var(--skip)", running: "#2563eb" };
   const names = { success: "成功", failed: "失败", skipped: "降级", running: "运行中" };
   const badge = el.querySelector(".run-badge");
   if (!badge) return;
   badge.textContent = names[r.status] || "";
-  badge.style.background = colors[r.status] || "#888";
 }
 function highlightRun(upTo = Infinity) {
   const runs = (state.lastRun?.node_runs || []).slice(0, upTo === Infinity ? undefined : upTo + 1);
@@ -923,13 +1069,17 @@ function renderRunPanel(run) {
   st.textContent = run.status === "success" ? "✅ 成功" : `❌ 失败：${run.error || ""}`;
   st.style.color = run.status === "success" ? "var(--ok)" : "var(--err)";
   const names = { success: "成功", failed: "失败", skipped: "降级" };
-  const colors = { success: "var(--ok)", failed: "var(--err)", skipped: "var(--skip)" };
-  $("#rp-list").innerHTML = (run.node_runs || []).map(r => `
+  $("#rp-list").innerHTML = (run.node_runs || []).map(r => {
+    const chip = { success: ["var(--ok-soft)", "var(--ok)"], failed: ["var(--err-soft)", "var(--err)"],
+                   skipped: ["var(--skip-soft)", "var(--ink-2)"] }[r.status]
+      || ["#f2f4f7", "var(--ink-2)"];
+    return `
     <div class="rp-row" data-node="${esc(r.node_id)}">
-      <span class="st" style="background:${colors[r.status] || "#888"}">${names[r.status] || r.status}</span>
+      <span class="st" style="background:${chip[0]};color:${chip[1]}">${names[r.status] || r.status}</span>
       <b>${esc(r.label)}</b>
       <span class="errmsg">${esc(r.error || "")}</span>
-      <span class="ms">${r.ms}ms</span></div>`).join("");
+      <span class="ms">${r.ms}ms</span></div>`;
+  }).join("");
   $$("#rp-list .rp-row").forEach(row => row.onclick = () => {
     const n = nodeById(row.dataset.node);
     if (n) select({ kind: "node", id: n.id });
@@ -1175,6 +1325,829 @@ $("#media-upload-input").onchange = async e => {
   toast("上传完成 ✅", "ok");
 };
 
+/* ================= 视图切换：智能体为核，画布为编排工具 ================= */
+function switchView(mode) {
+  state.viewMode = mode;
+  $("#nav-agents").classList.toggle("on", mode === "agents");
+  $("#nav-flows").classList.toggle("on", mode === "flows");
+  $("#agents-view").classList.toggle("view-hidden", mode !== "agents");
+  $("#topbar").classList.toggle("view-hidden", mode !== "flows");
+  $("#main").classList.toggle("view-hidden", mode !== "flows");
+  if (mode === "agents") renderAgentsHome();
+  else requestAnimationFrame(() => {   // 画布从隐藏变为可见后重新适配视口
+    updateVisibility(); fitView(); drawMinimap();
+  });
+}
+$("#nav-agents").onclick = () => switchView("agents");
+$("#nav-flows").onclick = () => switchView("flows");
+
+function renderAgentsHome() {
+  const grid = $("#agents-grid");
+  if (!grid) return;
+  if (!state.aiAgents.length) {
+    grid.innerHTML = '<div class="res-empty">还没有智能体。点右上「创建智能体」，配对知识库 / 技能 / 工具后即可对话。</div>';
+    return;
+  }
+  grid.innerHTML = state.aiAgents.map(a => `
+    <div class="agent-card" data-aid="${esc(a.id)}">
+      <div class="agent-head">
+        <span class="agent-ico">✨</span>
+        <div class="agent-title">
+          <b>${esc(a.name)}</b>
+          <span class="agent-id">${esc(a.id)} · ${a.flow_id ? "流程编排" : "对话式"}</span>
+        </div>
+      </div>
+      <p class="agent-desc">${esc(a.description || "")}</p>
+      <div class="res-tags">${[
+        a.flow_id ? `◆ 流程 · ${esc(a.flow_id)}` : "◇ ReAct",
+        ...(a.kb_ids || []).map(x => `📚 ${esc(x)}`),
+        ...(a.skill_ids || []).map(x => `🛠 ${esc(x)}`),
+        ...(a.tool_ids || []).map(x => `🧰 ${esc(x)}`),
+        ...(a.mcp_servers || []).map(x => `🔌 ${esc(x)}`),
+        a.memory ? "💾 记忆" : ""].filter(Boolean).map(t =>
+        `<span class="chip">${t}</span>`).join("")}</div>
+      <div class="agent-actions">
+        <button class="primary" data-act="chat">▶ 对话</button>
+        <button data-act="edit">编辑</button>
+        <button data-act="del" class="danger">删除</button>
+      </div>
+    </div>`).join("");
+  $$("#agents-grid .agent-card").forEach(card => {
+    const id = card.dataset.aid;
+    card.querySelector('[data-act="chat"]').onclick = () => openAgentChat(id);
+    card.querySelector('[data-act="edit"]').onclick = () =>
+      agentEditModal(state.aiAgents.find(a => a.id === id));
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确认删除智能体「${id}」？`)) return;
+      await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await loadResources(); toast("已删除", "ok");
+    };
+  });
+}
+$("#agents-new").onclick = () => agentEditModal(null);
+
+/* ================= 智能体对话面板 ================= */
+function openAgentChat(id) {
+  const a = state.aiAgents.find(x => x.id === id);
+  if (!a) return;
+  state.chatTarget = id;
+  $("#chatp-name").textContent = a.name;
+  const mode = $("#chatp-mode");
+  mode.textContent = a.flow_id ? `流程 · ${a.flow_id}` : "对话式";
+  mode.classList.add("on");
+  $("#chat-panel").classList.add("open");
+  renderChat();
+  $("#chatp-input").focus();
+}
+function renderChat() {
+  const box = $("#chatp-msgs");
+  const log = state.chatLog[state.chatTarget] || [];
+  box.innerHTML = log.map(m => m.role === "user"
+    ? `<div class="msg user">${esc(m.text)}</div>`
+    : `<div class="msg bot">${esc(m.text) || (m.error ? "⚠️ " + m.error : "…")}
+        ${m.steps && m.steps.length ? `<details class="msg-steps"><summary>执行步骤 ${m.steps.length}</summary>
+          <div class="res-snippet">${esc(m.steps.map(s =>
+            `· [${s.type}] ${s.name} → ${s.result || ""}`).join("\n"))}</div></details>` : ""}</div>`)
+    .join("") || '<div class="empty-tip">开始对话吧。回复会附带工具 / RAG 轨迹。</div>';
+  box.scrollTop = box.scrollHeight;
+}
+async function sendChat() {
+  const input = $("#chatp-input");
+  const text = input.value.trim();
+  if (!text || !state.chatTarget) return;
+  input.value = "";
+  const id = state.chatTarget;
+  (state.chatLog[id] = state.chatLog[id] || []).push({ role: "user", text });
+  renderChat();
+  const sending = state.chatLog[id];
+  sending.push({ role: "bot", text: "", error: null });
+  renderChat();
+  try {
+    const out = await api(`/api/ai-agents/${encodeURIComponent(id)}/invoke`,
+      { method: "POST", body: { message: text, session_id: state.chatSessions[id] } });
+    const mine = sending[sending.length - 1];
+    mine.text = out.text || "";
+    mine.steps = out.steps || [];
+    mine.error = out.error || null;
+    if (out.session_id) state.chatSessions[id] = out.session_id;
+  } catch (e) {
+    sending[sending.length - 1].error = e.message;
+  }
+  renderChat();
+}
+$("#chatp-close").onclick = () => $("#chat-panel").classList.remove("open");
+$("#chatp-new").onclick = () => {
+  state.chatSessions[state.chatTarget] = null;
+  state.chatLog[state.chatTarget] = [];
+  renderChat();
+};
+$("#chatp-send").onclick = sendChat;
+$("#chatp-input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+
+/* ================= 资源库面板（智能体 / 知识库 / 技能 / MCP / 记忆） ================= */
+const RES_TABS = [["kb", "知识库"], ["skills", "技能"],
+                  ["mcp", "MCP"], ["memory", "记忆"], ["evals", "评测"]];
+async function ensureMcpTools(server) {
+  if (!server || state.mcpTools[server]) return;
+    try { state.mcpTools[server] = await api(`/api/mcp/${encodeURIComponent(server)}/tools`); }
+  catch (e) { state.mcpTools[server] = []; toast(`MCP ${server} 工具列表失败：${e.message}`, "err"); }
+}
+function openResPanel(tab) {
+  if (tab) state.resTab = tab;
+  if (state.resTab === "agents") { switchView("agents"); return; }
+  $("#palette").classList.remove("open");
+  $("#inspector").classList.remove("open");
+  $("#media-panel").classList.remove("open");
+  $("#res-panel").classList.add("open");
+  renderResPanel();
+}
+$("#btn-res").onclick = () => openResPanel();
+$("#res-close").onclick = () => $("#res-panel").classList.remove("open");
+
+async function loadResources() {
+  try {
+    [state.aiAgents, state.kbs, state.skillList, state.mcpCfg, state.toolList] =
+      await Promise.all([api("/api/ai-agents"), api("/api/kb"), api("/api/skills"),
+                         api("/api/mcp"), api("/api/tools")]);
+    renderResPanel();
+    if (state.viewMode === "agents") renderAgentsHome();
+  } catch { /* 服务不可用时静默，面板打开会重试 */ }
+}
+
+/* ---- 评测中心 ---- */
+async function renderResEvals(body) {
+  if (state.evalView) {
+    if (state.evalView.mode === "run")
+      return evalRunView(body, state.evalView.run_id);
+    if (state.evalView.mode === "compare")
+      return evalCompareView(body, state.evalView.suite_id);
+  }
+  let suites = [], runs = [];
+  try {
+    [suites, runs] = await Promise.all([api("/api/evals/suites"), api("/api/evals/runs")]);
+  } catch (e) { body.innerHTML = `<div class="res-empty">${esc(e.message)}</div>`; return; }
+  body.innerHTML = `
+    <div class="res-actions"><button id="ev-suite-new" class="primary">＋ 新建评测集</button>
+      <span class="res-desc">标准问题 + 期望 → 跑平台智能体与 codex 等对比</span></div>
+    ${suites.map(s => `
+      <div class="res-card" data-suite="${esc(s.id)}">
+        <div class="res-title">📋 ${esc(s.name)} <span class="res-desc">${esc(s.id)}</span></div>
+        <div class="res-desc">${esc(s.description || "")} · ${s.cases} 个用例</div>
+        <div class="res-actions">
+          <button data-act="run" class="primary">▶ 运行评测</button>
+          <button data-act="cases">用例管理</button>
+          <button data-act="del" class="danger">删除</button></div>
+      </div>`).join("") || '<div class="res-empty">暂无评测集。</div>'}
+    <h3 style="font-size:13.5px;margin:6px 0 0">最近运行</h3>
+    ${runs.map(r => `
+      <div class="res-card" data-run="${esc(r.run_id)}" data-suiteid="${esc(r.suite_id || "")}">
+        <div class="res-title">🧪 ${esc(r.suite_id || "")} · ${esc(r.run_id)}
+          <span class="res-desc">${esc(r.started_at || "")}</span></div>
+        <div class="res-tags">${(r.targets || []).map(t => {
+          const ok = t.passed === t.total && t.total > 0;
+          return `<span class="chip" style="${ok ? "background:var(--ok);color:#fff" : ""}">
+            ${esc(t.name)} ${t.passed}/${t.total}</span>`;
+        }).join("")}</div>
+        <div class="res-actions"><button data-act="detail">详情</button>
+          <button data-act="compare">对比</button></div>
+      </div>`).join("") || '<div class="res-empty">还没有运行记录。</div>'}`;
+  $("#ev-suite-new").onclick = () => evalSuiteModal(null);
+  $$("#res-body .res-card[data-suite]").forEach(card => {
+    const id = card.dataset.suite;
+    card.querySelector('[data-act="run"]').onclick = () => evalRunModal(id);
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确认删除评测集「${id}」？`)) return;
+      await api(`/api/evals/suites/${encodeURIComponent(id)}`, { method: "DELETE" });
+      renderResEvals(body);
+    };
+    card.querySelector('[data-act="cases"]').onclick = async () =>
+      evalSuiteModal(await api(`/api/evals/suites/${encodeURIComponent(id)}`));
+  });
+  $$("#res-body .res-card[data-run]").forEach(card => {
+    const id = card.dataset.run;
+    card.querySelector('[data-act="detail"]').onclick = () => {
+      state.evalView = { mode: "run", run_id: id }; renderResPanel();
+    };
+    card.querySelector('[data-act="compare"]').onclick = () => {
+      state.evalView = { mode: "compare", suite_id: card.dataset.suiteid };
+      renderResPanel();
+    };
+  });
+}
+
+function evalRunModal(suiteId) {
+  const cliPresets = [
+    { key: "codex", name: "Codex CLI", type: "cli", command: "codex",
+      args: ["exec", "--skip-git-repo-check", "{prompt}"] },
+    { key: "claude", name: "Claude CLI", type: "cli", command: "claude",
+      args: ["-p", "{prompt}"] },
+  ];
+  const agents = state.aiAgents.map(a => ({
+    key: `platform:${a.id}`, name: `平台:${a.name}`, type: "platform", id: a.id }));
+  const all = [...agents, ...cliPresets];
+  openModal(`
+    <h2>运行评测 · ${esc(suiteId)}</h2>
+    <div class="field"><label>选择对比目标（可多选）</label>
+      ${all.map((t, i) => `<label class="res-kv">
+        <input type="checkbox" data-tgt="${i}" checked style="width:auto">
+        ${esc(t.name)}</label>`).join("")}</div>
+    <div class="field"><label>自定义目标（可选，JSON：type=cli 填 command/args，{prompt} 占位；type=http 填 url）</label>
+      <textarea id="ev-custom" rows="3" placeholder='{"key": "my", "type": "cli", "name": "我的agent", "command": "myagent", "args": ["--q", "{prompt}"]}'></textarea></div>
+    <div class="palette-note">CLI 目标每题最长等 5 分钟，外部 agent 无步骤轨迹（这正是对比点之一）。</div>
+    <div class="btn-row"><button id="ev-c">取消</button>
+      <button id="ev-o" class="primary">▶ 开始评测</button></div>`);
+  $("#ev-c").onclick = closeModal;
+  $("#ev-o").onclick = async () => {
+    let targets = all.filter((_, i) =>
+      $(`#modal [data-tgt="${i}"]`).checked);
+    const custom = $("#ev-custom").value.trim();
+    if (custom) {
+      try { targets = targets.concat([JSON.parse(custom)]); }
+      catch { return toast("自定义目标不是合法 JSON", "err"); }
+    }
+    if (!targets.length) return toast("至少选择一个目标", "err");
+    closeModal(); openResPanel("evals");
+    $("#res-body").innerHTML = '<div class="res-empty">评测运行中…外部 CLI agent 较慢，请耐心等待。</div>';
+    try {
+      const run = await api(`/api/evals/suites/${encodeURIComponent(suiteId)}/run`,
+        { method: "POST", body: { targets }, timeout: 600000 });
+      state.evalView = { mode: "run", run_id: run.run_id };
+      renderResPanel();
+      toast("评测完成 ✅", "ok");
+    } catch (e) {
+      toast(`评测失败：${e.message}`, "err");
+      renderResPanel();
+    }
+  };
+}
+
+function evalSuiteModal(suite) {
+  const isNew = !suite;
+  const cases = (suite?.cases || []).map(c => ({ ...c }));
+  const rowsHtml = () => cases.map((c, i) => `
+    <div class="res-card" data-ci="${i}">
+      <input data-ck="question" value="${esc(c.question || "")}" placeholder="标准问题" style="width:100%">
+      <input data-ck="contains" value="${esc(((c.expect || {}).contains || []).join(", "))}"
+        placeholder="必须包含的关键词（逗号分隔）" style="width:100%">
+      <input data-ck="not_contains" value="${esc(((c.expect || {}).not_contains || []).join(", "))}"
+        placeholder="不得包含（逗号分隔，可空）" style="width:100%">
+      <input data-ck="regex" value="${esc((c.expect || {}).regex || "")}" placeholder="正则（可空）" style="width:100%">
+      <div style="display:flex;gap:6px;align-items:center">
+        <input data-ck="note" value="${esc(c.note || "")}" placeholder="备注" style="flex:1">
+        <button data-cdel="${i}" class="danger" style="padding:3px 8px">删</button></div>
+    </div>`).join("");
+  const renderRows = () => {
+    $("#ev-cases").innerHTML = rowsHtml();
+    $$("#ev-cases [data-ck]").forEach(el => el.oninput = () => {
+      const c = cases[+el.closest("[data-ci]").dataset.ci];
+      const k = el.dataset.ck;
+      if (k === "contains" || k === "not_contains")
+        c.expect = c.expect || {},
+        c.expect[k] = el.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+      else if (k === "regex") (c.expect = c.expect || {}).regex = el.value || undefined;
+      else c[k] = el.value;
+    });
+    $$("#ev-cases [data-cdel]").forEach(btn => btn.onclick = () => {
+      cases.splice(+btn.dataset.cdel, 1); renderRows();
+    });
+  };
+  openModal(`
+    <h2>${isNew ? "新建评测集" : `编辑评测集 · ${esc(suite.id)}`}</h2>
+    <div class="field"><label>名称</label><input id="ev-name" value="${esc(suite?.name || "")}"></div>
+    <div class="field"><label>描述</label><input id="ev-desc" value="${esc(suite?.description || "")}"></div>
+    <div class="field"><label>用例（标准问题 + 期望）</label>
+      <div id="ev-cases" style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto">${rowsHtml()}</div>
+      <button id="ev-case-add" type="button" style="margin-top:6px">＋ 添加用例</button></div>
+    <div class="btn-row"><button id="ev-c">取消</button><button id="ev-o" class="primary">保存</button></div>`);
+  renderRows();
+  $("#ev-case-add").onclick = () => {
+    cases.push({ question: "", expect: {}, note: "" }); renderRows();
+  };
+  $("#ev-c").onclick = closeModal;
+  $("#ev-o").onclick = async () => {
+    const body = {
+      id: isNew ? ($("#ev-name").value.trim().toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `suite-${Date.now() % 10000}`)
+        : suite.id,
+      name: $("#ev-name").value.trim(), description: $("#ev-desc").value.trim(),
+      cases: cases.filter(c => c.question && c.question.trim()) };
+    if (!body.cases.length) return toast("至少一个用例", "err");
+    try {
+      await api(isNew ? "/api/evals/suites" : `/api/evals/suites/${encodeURIComponent(suite.id)}`,
+        { method: isNew ? "POST" : "PUT", body });
+      closeModal(); toast("评测集已保存 ✅", "ok"); renderResPanel();
+    } catch (e) { toast(`保存失败：${e.message}`, "err"); }
+  };
+}
+
+async function evalRunView(body, runId) {
+  body.innerHTML = '<div class="res-empty">加载中…</div>';
+  let run;
+  try { run = await api(`/api/evals/runs/${encodeURIComponent(runId)}`); }
+  catch (e) { body.innerHTML = `<div class="res-empty">${esc(e.message)}</div>`; return; }
+  const byTarget = {};
+  for (const r of run.results || []) (byTarget[r.target_key] = byTarget[r.target_key] || []).push(r);
+  const stepsText = r => (r.steps || []).map(s =>
+    `· [${s.type}] ${s.name} ${JSON.stringify(s.args || {}).slice(0, 90)} → ${s.result || ""}`).join("\n");
+  body.innerHTML = `
+    <div class="res-actions"><button id="ev-back">← 返回</button>
+      <button id="ev-cmp">与另一次运行对比</button></div>
+    ${(Object.entries(byTarget)).map(([key, rows]) => {
+      const passed = rows.filter(r => r.pass).length;
+      const caseRows = rows.map(r => `
+          <div class="res-doc-row">
+            <span style="width:16px">${r.pass ? "✅" : r.error ? "🚫" : "❌"}</span>
+            <span class="doc-name" title="${esc(r.question)}">${esc(r.question)}</span>
+            <span class="doc-meta">${r.ms}ms</span></div>
+          ${r.error ? `<div class="res-desc" style="color:var(--err)">错误：${esc(r.error)}</div>` : ""}
+          ${!r.pass && !r.error ? `<div class="res-desc" style="color:var(--err)">未通过：${esc((r.checks || []).filter(c => !c.ok).map(c => c.name + (c.detail ? `（${c.detail}）` : "")).join("；"))}</div>` : ""}
+          <div class="res-snippet">答：${esc((r.answer || "").slice(0, 300)) || "（空）"}</div>
+          ${(r.steps || []).length ? `<details><summary class="res-desc" style="cursor:pointer">执行步骤（${r.steps.length}）</summary>
+            <div class="res-snippet">${esc(stepsText(r))}</div></details>` : ""}`).join("");
+      return `
+      <div class="res-card">
+        <div class="res-title">${passed === rows.length ? "✅" : "⚠️"} ${esc(key)}
+          <span class="res-desc">${passed}/${rows.length} 通过 · 平均 ${Math.round(rows.reduce((s, r) => s + r.ms, 0) / rows.length)}ms</span></div>
+        ${caseRows}
+      </div>`;
+    }).join("")}`;
+  $("#ev-back").onclick = () => { state.evalView = null; renderResPanel(); };
+  $("#ev-cmp").onclick = () => { state.evalView = { mode: "compare", suite_id: run.suite_id }; evalCompareView(body, run.suite_id, runId); };
+}
+
+async function evalCompareView(body, suiteId, presetRunId) {
+  body.innerHTML = '<div class="res-empty">加载中…</div>';
+  let runs = [];
+  try { runs = await api(`/api/evals/runs?suite_id=${encodeURIComponent(suiteId || "")}`); }
+  catch (e) { body.innerHTML = `<div class="res-empty">${esc(e.message)}</div>`; return; }
+  const ids = runs.map(r => r.run_id);
+  const a = presetRunId && ids.includes(presetRunId) ? presetRunId : ids[0];
+  const b = ids.find(x => x !== a) || a;
+  body.innerHTML = `
+    <div class="res-actions"><button id="ev-back">← 返回</button>
+      <select id="ev-ra">${ids.map(x => `<option ${x === a ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>
+      <span class="res-desc">vs</span>
+      <select id="ev-rb">${ids.map(x => `<option ${x === b ? "selected" : ""}>${esc(x)}</option>`).join("")}</select>
+      <button id="ev-go" class="primary">对比</button></div>
+    <div id="ev-cmp-out"></div>`;
+  $("#ev-back").onclick = () => { state.evalView = null; renderResPanel(); };
+  const doCompare = async () => {
+    const ra = $("#ev-ra").value, rb = $("#ev-rb").value;
+    if (ra === rb) return toast("请选择两次不同的运行", "err");
+    let cmp;
+    try { cmp = await api(`/api/evals/compare?run_a=${encodeURIComponent(ra)}&run_b=${encodeURIComponent(rb)}`); }
+    catch (e) { return toast(e.message, "err"); }
+    $("#ev-cmp-out").innerHTML = `
+      <div class="res-card"><div class="res-title">
+        ${cmp.diff_count ? `⚠️ ${cmp.diff_count} 个用例结论不一致` : "✅ 两次运行结论一致"}</div></div>
+      ${cmp.rows.map(row => `
+        <div class="res-card" style="${row.diff ? "border-color:var(--err)" : ""}">
+          <div class="res-title">${row.diff ? "⚡" : "·"} ${esc(row.question)}</div>
+          ${row.cells.map(c => `
+            <div class="res-doc-row">
+              <span style="width:16px">${c.pass ? "✅" : "❌"}</span>
+              <span class="doc-name" style="max-width:110px" title="${esc(c.target_key)}">${esc(c.target_key)}</span>
+              <span class="doc-meta">${c.ms}ms</span></div>
+            <div class="res-snippet">${esc(c.answer) || `（${esc(c.error || "无输出")}）`}</div>`).join("")}
+        </div>`).join("")}`;
+  };
+  $("#ev-go").onclick = doCompare;
+  doCompare();
+}
+
+function renderResPanel() {
+  $("#res-tabs").innerHTML = RES_TABS.map(([k, label]) =>
+    `<button class="chip ${state.resTab === k ? "on" : ""}" data-rtab="${k}">${label}</button>`).join("");
+  $$("#res-tabs .chip").forEach(c => c.onclick = () => { state.resTab = c.dataset.rtab; renderResPanel(); });
+  const body = $("#res-body");
+  ({ agents: renderResAgents, kb: renderResKb, skills: renderResSkills,
+     mcp: renderResMcp, memory: renderResMemory, evals: renderResEvals
+  })[state.resTab](body);
+}
+
+/* ---- 智能体 ---- */
+function renderResAgents(body) {
+  body.innerHTML = `
+    <div class="res-actions"><button id="res-agent-new" class="primary">＋ 新建智能体</button></div>
+    ${state.aiAgents.map(a => `
+      <div class="res-card" data-aid="${esc(a.id)}">
+        <div class="res-title">✨ ${esc(a.name)} <span class="res-desc">${esc(a.id)}</span>
+          <span class="spacer"></span></div>
+        <div class="res-desc">${esc(a.description || "")}</div>
+        <div class="res-tags">${[
+          a.flow_id ? `◆ 流程编排 · ${esc(a.flow_id)}` : "◇ 对话式 ReAct",
+          ...(a.kb_ids || []).map(x => `📚 ${esc(x)}`),
+          ...(a.skill_ids || []).map(x => `🛠 ${esc(x)}`),
+          ...(a.tool_ids || []).map(x => `🧰 ${esc(x)}`),
+          ...(a.mcp_servers || []).map(x => `🔌 ${esc(x)}`),
+          a.memory ? "💾 记忆" : ""].filter(Boolean).map(t =>
+          `<span class="chip">${t}</span>`).join("")}</div>
+        <div class="res-actions">
+          <button data-act="edit">编辑</button>
+          <button data-act="invoke">▶ 调试运行</button>
+          <button data-act="del" class="danger">删除</button></div>
+      </div>`).join("") || '<div class="res-empty">还没有智能体，点上方新建。</div>'}`;
+  $("#res-agent-new").onclick = () => agentEditModal(null);
+  $$("#res-body .res-card").forEach(card => {
+    const id = card.dataset.aid;
+    card.querySelector('[data-act="edit"]').onclick = () =>
+      agentEditModal(state.aiAgents.find(a => a.id === id));
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确认删除智能体「${id}」？`)) return;
+      await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await loadResources(); toast("已删除", "ok");
+    };
+    card.querySelector('[data-act="invoke"]').onclick = () => agentInvokeModal(id);
+  });
+}
+function agentEditModal(agent) {
+  const isNew = !agent;
+  const a = agent || { id: "", name: "", description: "", system: "你是一个得力的智能体。",
+                       flow_id: "", kb_ids: [], skill_ids: [], tool_ids: [],
+                       mcp_servers: [], memory: true, max_steps: 8, rag_top_k: 4 };
+  const checks = (items, sel, attr) => (items || []).map(it =>
+    `<label class="res-kv"><input type="checkbox" data-${attr}="${esc(it.id || it.name || it)}"
+      ${sel.includes(it.id || it.name || it) ? "checked" : ""} style="width:auto">
+      ${esc(it.name || it.id || it)}</label>`).join("");
+  const flowOpts = (state.flows || []).map(f =>
+    `<option value="${esc(f.id)}" ${f.id === a.flow_id ? "selected" : ""}>${esc(f.name)}（${esc(f.id)}）</option>`).join("");
+  openModal(`
+    <h2>${isNew ? "创建智能体" : `编辑智能体 · ${esc(a.id)}`}</h2>
+    <div class="ag-sec">身份</div>
+    <div class="field"><label>名称</label><input id="ag-name" value="${esc(a.name)}"></div>
+    ${isNew ? `<div class="field"><label>ID（字母数字-，留空自动生成）</label><input id="ag-id"></div>` : ""}
+    <div class="field"><label>描述</label><input id="ag-desc" value="${esc(a.description)}"></div>
+    <div class="field"><label>System 提示词（角色与行为边界）</label>
+      <textarea id="ag-system" rows="5">${esc(a.system || "")}</textarea></div>
+
+    <div class="ag-sec">编排方式</div>
+    <div class="field"><select id="ag-mode">
+      <option value="" ${!a.flow_id ? "selected" : ""}>对话式 —— ReAct 工具循环，模型自主推理</option>
+      <option value="flow" ${a.flow_id ? "selected" : ""}>流程编排 —— 绑定画布流程作为执行策略</option>
+    </select></div>
+    <div class="field" id="ag-flow-row" ${!a.flow_id ? 'style="display:none"' : ""}>
+      <label>绑定流程（消息作为 input.message 进入流程）</label>
+      <select id="ag-flow">${flowOpts || '<option value="">（暂无流程）</option>'}</select>
+      <div class="hint">流程里可用「智能体」节点继续组装；嵌套最多 3 层。</div></div>
+
+    <div class="ag-sec">能力配对</div>
+    <div class="field"><label>📚 知识库（自动 RAG 检索注入）</label>
+      ${checks(state.kbs, a.kb_ids, "agkb") || '<span class="hint">暂无知识库</span>'}
+      <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+        <span class="hint">检索片段数</span>
+        <input id="ag-ragk" type="number" value="${a.rag_top_k || 4}" style="width:70px"></div></div>
+    <div class="field"><label>🛠 技能（指令包，注入提示词）</label>
+      ${checks(state.skillList, a.skill_ids, "agskill") || '<span class="hint">暂无技能</span>'}</div>
+    <div class="field"><label>🧰 工具</label>
+      ${checks(state.toolList, a.tool_ids, "agtool") || '<span class="hint">暂无工具</span>'}</div>
+    <div class="field"><label>🔌 MCP 服务器</label>
+      ${checks(Object.keys(state.mcpCfg.servers || {}), a.mcp_servers, "agmcp") || '<span class="hint">未配置 MCP</span>'}</div>
+
+    <div class="ag-sec">记忆与执行</div>
+    <div class="field"><label>长期记忆
+      <input id="ag-memory" type="checkbox" ${a.memory ? "checked" : ""} style="width:auto"></label>
+      <div class="hint">按 agent / 会话作用域自动读写最近对话</div></div>
+    <div class="field"><label>工具循环最大步数（对话式）</label>
+      <input id="ag-steps" type="number" value="${a.max_steps || 8}"></div>
+    <div class="btn-row"><button id="ag-cancel">取消</button>
+      <button id="ag-ok" class="primary">保存</button></div>`);
+  $("#ag-cancel").onclick = closeModal;
+  $("#ag-mode").onchange = () => {
+    $("#ag-flow-row").style.display = $("#ag-mode").value === "flow" ? "" : "none";
+  };
+  $("#ag-ok").onclick = async () => {
+    const body = {
+      id: isNew ? ($("#ag-id").value.trim() || ($("#ag-name").value.trim()
+        .toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `agent-${Date.now() % 10000}`))
+        : a.id,
+      name: $("#ag-name").value.trim(), description: $("#ag-desc").value.trim(),
+      system: $("#ag-system").value,
+      flow_id: $("#ag-mode").value === "flow" ? ($("#ag-flow").value || "") : "",
+      kb_ids: [...$$("#modal [data-agkb]")].filter(c => c.checked).map(c => c.dataset.agkb),
+      skill_ids: [...$$("#modal [data-agskill]")].filter(c => c.checked).map(c => c.dataset.agskill),
+      tool_ids: [...$$("#modal [data-agtool]")].filter(c => c.checked).map(c => c.dataset.agtool),
+      mcp_servers: [...$$("#modal [data-agmcp]")].filter(c => c.checked).map(c => c.dataset.agmcp),
+      memory: $("#ag-memory").checked,
+      max_steps: Number($("#ag-steps").value) || 8,
+      rag_top_k: Number($("#ag-ragk").value) || 4,
+    };
+    if (body.flow_id && !(state.flows || []).some(f => f.id === body.flow_id))
+      return toast("绑定的流程不存在", "err");
+    try {
+      await api(isNew ? "/api/ai-agents" : `/api/ai-agents/${encodeURIComponent(a.id)}`,
+                { method: isNew ? "POST" : "PUT", body });
+      closeModal(); await loadResources(); renderResPanel();
+      toast("智能体已保存 ✅", "ok");
+    } catch (e) { toast(`保存失败：${e.message}`, "err"); }
+  };
+}
+function agentInvokeModal(agentId) {
+  openModal(`
+    <h2>调试运行 · ${esc(agentId)}</h2>
+    <div class="field"><label>输入消息</label>
+      <textarea id="ag-msg" rows="3" placeholder="问点什么…"></textarea></div>
+    <div class="field"><label>会话 ID（留空=新会话）</label><input id="ag-session"></div>
+    <div class="btn-row"><button id="ag-irun-cancel">取消</button>
+      <button id="ag-irun" class="primary">▶ 运行</button></div>
+    <div id="ag-irun-out" class="res-snippet" style="display:none"></div>`);
+  $("#ag-irun-cancel").onclick = closeModal;
+  $("#ag-irun").onclick = async () => {
+    const msg = $("#ag-msg").value.trim();
+    if (!msg) return toast("请输入消息", "err");
+    $("#ag-irun").disabled = true;
+    $("#ag-irun-out").style.display = "block";
+    $("#ag-irun-out").textContent = "运行中…";
+    try {
+      const out = await api(`/api/ai-agents/${encodeURIComponent(agentId)}/invoke`,
+        { method: "POST", body: { message: msg, session_id: $("#ag-session").value.trim() || undefined } });
+      $("#ag-irun-out").textContent =
+        `【回复】${out.text || "（空）"}\n\n【工具调用 ${out.tool_calls || 0} 次】\n` +
+        (out.steps || []).map(s => `· ${s.name}(${JSON.stringify(s.args).slice(0, 80)}) → ${s.result || ""}`).join("\n")
+        + (out.error ? `\n【错误】${out.error}` : "");
+    } catch (e) { $("#ag-irun-out").textContent = `失败：${e.message}`; }
+    $("#ag-irun").disabled = false;
+  };
+}
+
+/* ---- 知识库 ---- */
+function renderResKb(body) {
+  body.innerHTML = `
+    <div class="res-actions"><button id="res-kb-new" class="primary">＋ 新建知识库</button></div>
+    ${state.kbs.map(k => `
+      <div class="res-card" data-kb="${esc(k.id)}">
+        <div class="res-title">📚 ${esc(k.name)} <span class="res-desc">${esc(k.id)}</span></div>
+        <div class="res-desc">${esc(k.description || "")} · ${k.docs} 文档 / ${k.chunks} 片段</div>
+        <div class="res-actions">
+          <button data-act="docs">文档管理</button>
+          <button data-act="search">检索测试</button>
+          <button data-act="del" class="danger">删除</button></div>
+        <div data-kbdocs="${esc(k.id)}"></div>
+      </div>`).join("") || '<div class="res-empty">还没有知识库，点上方新建。</div>'}`;
+  $("#res-kb-new").onclick = () => {
+    openModal(`
+      <h2>新建知识库</h2>
+      <div class="field"><label>名称</label><input id="kbn" placeholder="例：产品手册"></div>
+      <div class="field"><label>ID（字母数字-，留空自动生成）</label><input id="kbi"></div>
+      <div class="field"><label>描述</label><input id="kbd"></div>
+      <div class="btn-row"><button id="kbc">取消</button><button id="kbo" class="primary">创建</button></div>`);
+    $("#kbc").onclick = closeModal;
+    $("#kbo").onclick = async () => {
+      const name = $("#kbn").value.trim();
+      if (!name) return toast("请填写名称", "err");
+      const id = $("#kbi").value.trim() || name.toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `kb-${Date.now() % 10000}`;
+      try {
+        await api("/api/kb", { method: "POST", body: { id, name, description: $("#kbd").value.trim() } });
+        closeModal(); await loadResources(); toast("知识库已创建 ✅", "ok");
+      } catch (e) { toast(`创建失败：${e.message}`, "err"); }
+    };
+  };
+  $$("#res-body .res-card[data-kb]").forEach(card => {
+    const id = card.dataset.kb;
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确认删除知识库「${id}」及其全部文档？`)) return;
+      await api(`/api/kb/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await loadResources(); toast("已删除", "ok");
+    };
+    card.querySelector('[data-act="docs"]').onclick = () => kbDocsToggle(id, card);
+    card.querySelector('[data-act="search"]').onclick = () => kbSearchModal(id);
+  });
+}
+async function kbDocsToggle(kbId, card) {
+  const box = card.querySelector(`[data-kbdocs="${kbId}"]`);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  let docs = state.kbDocs[kbId];
+  if (!docs) { docs = state.kbDocs[kbId] = await api(`/api/kb/${encodeURIComponent(kbId)}/docs`); }
+  box.innerHTML = `
+    <div style="margin-top:6px;display:flex;flex-direction:column;gap:2px">
+      ${docs.map(d => `
+        <div class="res-doc-row">
+          <span class="doc-name" title="${esc(d.name)}">${esc(d.name)}</span>
+          <span class="doc-meta">${d.chunks} 块 · ${Math.max(1, Math.round(d.bytes / 1024))}KB</span>
+          <button data-del="${esc(d.doc_id)}" title="删除文档" style="font-size:12px;padding:2px 8px">×</button>
+        </div>`).join("") || '<span class="res-desc">暂无文档</span>'}
+    </div>
+    <div class="res-actions" style="margin-top:6px">
+      <button data-act="add">＋ 粘贴文本入库</button>
+      <button data-act="upload">⬆ 上传文本文件</button>
+      <input type="file" hidden accept=".md,.txt,.json,.csv,.html" data-finput>
+    </div>`;
+  box.querySelectorAll("[data-del]").forEach(btn => btn.onclick = async () => {
+    await api(`/api/kb/${encodeURIComponent(kbId)}/docs/${btn.dataset.del}`, { method: "DELETE" });
+    delete state.kbDocs[kbId]; await loadResources(); toast("文档已删除", "ok");
+  });
+  box.querySelector('[data-act="add"]').onclick = () => {
+    openModal(`
+      <h2>文本入库 · ${esc(kbId)}</h2>
+      <div class="field"><label>文档名</label><input id="kdoc-name"></div>
+      <div class="field"><label>内容</label><textarea id="kdoc-text" rows="10"></textarea></div>
+      <div class="btn-row"><button id="kdoc-c">取消</button><button id="kdoc-o" class="primary">入库</button></div>`);
+    $("#kdoc-c").onclick = closeModal;
+    $("#kdoc-o").onclick = async () => {
+      const text = $("#kdoc-text").value;
+      if (!text.trim()) return toast("内容为空", "err");
+      try {
+        await api(`/api/kb/${encodeURIComponent(kbId)}/docs`,
+          { method: "POST", body: { name: $("#kdoc-name").value.trim() || "未命名文档", text } });
+        closeModal(); delete state.kbDocs[kbId]; await loadResources();
+        toast("已入库 ✅", "ok");
+      } catch (e) { toast(`入库失败：${e.message}`, "err"); }
+    };
+  };
+  const finput = box.querySelector("[data-finput]");
+  box.querySelector('[data-act="upload"]').onclick = () => finput.click();
+  finput.onchange = async () => {
+    for (const f of [...finput.files || []]) {
+      try {
+        await api(`/api/kb/${encodeURIComponent(kbId)}/docs/upload?name=${encodeURIComponent(f.name)}`,
+          { method: "POST", body: await f.text(), headers: {} });
+      } catch (e) { toast(`上传失败 ${f.name}：${e.message}`, "err"); }
+    }
+    finput.value = ""; delete state.kbDocs[kbId]; await loadResources();
+    toast("上传完成 ✅", "ok");
+  };
+}
+function kbSearchModal(kbId) {
+  openModal(`
+    <h2>检索测试 · ${esc(kbId)}</h2>
+    <div class="field"><label>查询</label><input id="kq" placeholder="问一句…"></div>
+    <div class="btn-row"><button id="kq-go" class="primary">检索</button></div>
+    <div id="kq-out" class="res-snippet" style="display:none"></div>`);
+  $("#kq").focus();
+  const go = async () => {
+    try {
+      const hits = await api("/api/kb/search", { method: "POST",
+        body: { query: $("#kq").value, kb_ids: [kbId], top_k: 5 } });
+      $("#kq-out").style.display = "block";
+      $("#kq-out").textContent = hits.map(h =>
+        `【${h.name}｜相关度 ${h.score}】${h.text}`).join("\n\n") || "（无结果）";
+    } catch (e) { toast(e.message, "err"); }
+  };
+  $("#kq-go").onclick = go;
+  $("#kq").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+}
+
+/* ---- 技能 ---- */
+function renderResSkills(body) {
+  body.innerHTML = `
+    <div class="res-actions"><button id="res-skill-new" class="primary">＋ 新建技能</button></div>
+    ${state.skillList.map(s => `
+      <div class="res-card" data-sid="${esc(s.id)}">
+        <div class="res-title">🛠 ${esc(s.name)} <span class="res-desc">${esc(s.id)}</span></div>
+        <div class="res-desc">${esc(s.description || "")} · ${s.chars} 字</div>
+        <div class="res-actions"><button data-act="edit">查看 / 编辑</button>
+          <button data-act="del" class="danger">删除</button></div>
+      </div>`).join("") || '<div class="res-empty">还没有技能，点上方新建。</div>'}`;
+  $("#res-skill-new").onclick = () => skillEditModal(null);
+  $$("#res-body .res-card[data-sid]").forEach(card => {
+    const id = card.dataset.sid;
+    card.querySelector('[data-act="edit"]').onclick = async () =>
+      skillEditModal(await api(`/api/skills/${encodeURIComponent(id)}`));
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确认删除技能「${id}」？`)) return;
+      await api(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await loadResources(); toast("已删除", "ok");
+    };
+  });
+}
+function skillEditModal(skill) {
+  const isNew = !skill;
+  openModal(`
+    <h2>${isNew ? "新建技能" : `编辑技能 · ${esc(skill.id)}`}</h2>
+    <div class="field"><label>技能名</label>
+      <input id="sk-name" value="${esc(skill?.name || "")}"></div>
+    <div class="field"><label>描述（给 LLM / 节点选择看的）</label>
+      <input id="sk-desc" value="${esc(skill?.description || "")}"></div>
+    <div class="field"><label>指令内容（Markdown，会注入 system 提示词）</label>
+      <textarea id="sk-content" rows="12">${esc(skill?.content || "")}</textarea></div>
+    <div class="btn-row"><button id="sk-c">取消</button>
+      <button id="sk-o" class="primary">保存</button></div>`);
+  $("#sk-c").onclick = closeModal;
+  $("#sk-o").onclick = async () => {
+    const id = isNew ? ($("#sk-name").value.trim().toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `skill-${Date.now() % 10000}`)
+      : skill.id;
+    try {
+      await api(`/api/skills/${encodeURIComponent(id)}`, { method: "PUT", body: {
+        name: $("#sk-name").value.trim(), description: $("#sk-desc").value.trim(),
+        content: $("#sk-content").value } });
+      closeModal(); await loadResources(); toast("技能已保存 ✅", "ok");
+    } catch (e) { toast(`保存失败：${e.message}`, "err"); }
+  };
+}
+
+/* ---- MCP ---- */
+function renderResMcp(body) {
+  const servers = state.mcpCfg.servers || {};
+  body.innerHTML = `
+    <div class="palette-note">MCP 走 stdio 传输：本机命令行启动的服务进程。
+      常见如 <code>npx -y @modelcontextprotocol/server-filesystem /some/dir</code>。</div>
+    <div class="res-actions"><button id="res-mcp-new" class="primary">＋ 添加服务器</button></div>
+    ${Object.entries(servers).map(([name, cfg]) => `
+      <div class="res-card" data-mcp="${esc(name)}">
+        <div class="res-title">🔌 ${esc(name)}</div>
+        <div class="res-snippet">${esc(cfg.command)} ${(cfg.args || []).join(" ")}</div>
+        <div class="res-actions"><button data-act="tools">列出工具</button>
+          <button data-act="edit">编辑</button>
+          <button data-act="del" class="danger">删除</button></div>
+        <div data-mcptools></div>
+      </div>`).join("") || '<div class="res-empty">未配置 MCP 服务器。</div>'}`;
+  $("#res-mcp-new").onclick = () => mcpEditModal(null);
+  $$("#res-body .res-card[data-mcp]").forEach(card => {
+    const name = card.dataset.mcp;
+    card.querySelector('[data-act="tools"]').onclick = async () => {
+      const box = card.querySelector("[data-mcptools]");
+      box.innerHTML = '<span class="res-desc">连接中…</span>';
+      await ensureMcpTools(name);
+      const tools = state.mcpTools[name] || [];
+      box.innerHTML = tools.map(t => `
+        <div class="res-doc-row"><span class="doc-name" title="${esc(t.description || "")}">
+          <b>${esc(t.name)}</b> — ${esc(t.description || "")}</span></div>`)
+        .join("") || '<span class="res-desc">无工具或连接失败</span>';
+    };
+    card.querySelector('[data-act="edit"]').onclick = () =>
+      mcpEditModal([name, servers[name]]);
+    card.querySelector('[data-act="del"]').onclick = async () => {
+      delete servers[name];
+      state.mcpCfg = await api("/api/mcp", { method: "PUT", body: { servers } });
+      await loadResources(); toast("已删除", "ok");
+    };
+  });
+}
+function mcpEditModal(existing) {
+  const isNew = !existing;
+  const [name, cfg] = existing || ["", { command: "", args: [], env: {} }];
+  openModal(`
+    <h2>${isNew ? "添加 MCP 服务器" : `编辑 MCP · ${esc(name)}`}</h2>
+    <div class="field"><label>名称（字母数字-）</label><input id="mc-name" value="${esc(name)}"></div>
+    <div class="field"><label>启动命令</label>
+      <input id="mc-cmd" placeholder="如 npx / python3 / uvx" value="${esc(cfg.command || "")}"></div>
+    <div class="field"><label>参数（每行一个）</label>
+      <textarea id="mc-args" rows="4">${esc((cfg.args || []).join("\n"))}</textarea></div>
+    <div class="field"><label>环境变量 JSON（可空）</label>
+      <textarea id="mc-env" rows="3">${esc(JSON.stringify(cfg.env || {}, null, 2))}</textarea></div>
+    <div class="btn-row"><button id="mc-c">取消</button><button id="mc-o" class="primary">保存</button></div>`);
+  $("#mc-c").onclick = closeModal;
+  $("#mc-o").onclick = async () => {
+    const servers = JSON.parse(JSON.stringify(state.mcpCfg.servers || {}));
+    let env = {};
+    try { env = JSON.parse($("#mc-env").value || "{}"); }
+    catch { return toast("环境变量不是合法 JSON", "err"); }
+    servers[$("#mc-name").value.trim()] = {
+      command: $("#mc-cmd").value.trim(),
+      args: $("#mc-args").value.split("\n").map(s => s.trim()).filter(Boolean),
+      env };
+    try {
+      state.mcpCfg = await api("/api/mcp", { method: "PUT", body: { servers } });
+      closeModal(); await loadResources(); toast("MCP 配置已保存 ✅", "ok");
+    } catch (e) { toast(`保存失败：${e.message}`, "err"); }
+  };
+}
+
+/* ---- 记忆 ---- */
+async function renderResMemory(body) {
+  let scopes = [];
+  try { scopes = await api("/api/memory/scopes"); } catch { /* 忽略 */ }
+  const cur = state.memScope || (scopes[0]?.scope ?? "global");
+  body.innerHTML = `
+    <div id="res-mem-scopes" style="display:flex;gap:5px;flex-wrap:wrap">
+      ${scopes.map(s => `<button class="chip ${s.scope === cur ? "on" : ""}" data-scope="${esc(s.scope)}">
+        ${esc(s.scope)}（${s.count}）</button>`).join("")}
+      ${scopes.length ? "" : '<span class="res-desc">暂无记忆条目（流程/智能体运行后出现）</span>'}
+    </div>
+    <div class="res-actions">
+      <input id="mem-k" placeholder="key" style="max-width:110px">
+      <input id="mem-v" placeholder="value" style="flex:1">
+      <button id="mem-add" class="primary">写入 ${esc(cur)}</button></div>
+    <div id="res-mem-list" style="display:flex;flex-direction:column;gap:6px"></div>`;
+  $$("#res-mem-scopes .chip").forEach(c => c.onclick = () => {
+    state.memScope = c.dataset.scope; renderResMemory(body);
+  });
+  $("#mem-add").onclick = async () => {
+    const k = $("#mem-k").value.trim(), v = $("#mem-v").value;
+    if (!k) return toast("请填写 key", "err");
+    let val = v; try { val = JSON.parse(v); } catch { /* 保持字符串 */ }
+    await api("/api/memory", { method: "POST", body: { scope: cur, key: k, value: val } });
+    toast("已写入 ✅", "ok"); renderResMemory(body);
+  };
+  try {
+    const items = await api(`/api/memory?scope=${encodeURIComponent(cur)}&limit=100`);
+    $("#res-mem-list").innerHTML = items.map(it => `
+      <div class="res-card"><div class="res-title"><b>${esc(it.key)}</b>
+        <span class="spacer"></span>
+        <button data-mk="${esc(it.key)}" title="删除" style="font-size:12px;padding:2px 8px">×</button></div>
+        <div class="res-snippet">${esc(fmtJson(it.value))}</div></div>`).join("")
+      || '<div class="res-empty">该作用域暂无条目。</div>';
+    $$("#res-mem-list [data-mk]").forEach(btn => btn.onclick = async () => {
+      await api(`/api/memory?scope=${encodeURIComponent(cur)}&key=${encodeURIComponent(btn.dataset.mk)}`,
+        { method: "DELETE" });
+      renderResMemory(body);
+    });
+  } catch (e) { $("#res-mem-list").innerHTML = `<div class="res-empty">${esc(e.message)}</div>`; }
+}
+
 /* ================= 运行 ================= */
 $("#btn-run").onclick = () => {
   if (!state.graph) return;
@@ -1251,15 +2224,22 @@ function showReplyModal(r) {
 $("#chat-send").onclick = chat;
 $("#chat-input").addEventListener("keydown", e => { if (e.key === "Enter") chat(); });
 
-/* ================= 节点面板（分组） ================= */
+/* ================= 节点面板（分组） =================
+ * 概念模型（对齐 Dify）：知识库 / 记忆 / 技能 是配对给智能体的能力，
+ * 在「资源库」中绑定；画布只放控制流 / 动作 / 智能体调用。 */
 const PALETTE_GROUPS = [
-  ["基础", ["start", "end", "brain", "llm", "agent", "condition", "intent", "template", "http"]],
+  ["流程", ["start", "end", "llm", "condition", "intent", "template", "http"]],
+  ["智能体", ["ai_agent", "brain"]],
+  ["动作", ["tool", "mcp", "agent"]],
   ["视频制作", ["storyboard", "character", "keyframe", "shot_video", "merge_video", "asset"]],
 ];
 const PALETTE_DESC = {
-  start: "流程入口与输入变量", end: "流程出口，产出回复", brain: "交给 AgentRoam 推理",
-  llm: "大模型文本生成", agent: "调用已注册的能力", condition: "表达式选分支",
+  start: "流程入口与输入变量", end: "流程出口，产出回复",
+  llm: "大模型文本生成", condition: "表达式选分支",
   intent: "话术意图分流", template: "渲染文本模板", http: "发起 HTTP 请求",
+  ai_agent: "调用智能体（自带知识库/记忆/技能/工具）", brain: "交给外部运行时推理",
+  tool: "调用内置工具", mcp: "调用 MCP 服务器的工具",
+  agent: "调用本地注册的能力（job_agent 等）",
   storyboard: "剧情 → 分镜表", character: "多方位角色设定图", keyframe: "逐镜生成首帧图",
   shot_video: "关键帧图生视频", merge_video: "ffmpeg 合成长片", asset: "引用素材库",
 };
@@ -1291,6 +2271,13 @@ function addNode(type) {
   if (type === "template") defaults.template = "";
   if (type === "intent") defaults.intents = [{ name: "intent_1", description: "", samples: [] }];
   if (type === "character" && !defaults.views) defaults.views = ["正面", "左侧", "右侧", "背面"];
+  if (type === "ai_agent" && state.aiAgents.length) defaults.ai_agent_id = state.aiAgents[0].id;
+  if (type === "skill" && state.skillList.length) defaults.skill_id = state.skillList[0].id;
+  if (type === "mcp") {
+    const servers = Object.keys(state.mcpCfg.servers || {});
+    if (servers.length) defaults.server = servers[0];
+  }
+  if (type === "tool" && state.toolList.length) defaults.tool = state.toolList[0].name;
   state.graph.nodes.push({ id, type, label: meta.label || type, params: defaults,
                            pos: { x: p.x, y: Math.max(p.y, 40) } });
   ensureNodeEl(state.graph.nodes[state.graph.nodes.length - 1]);
@@ -1310,6 +2297,8 @@ function addNode(type) {
     if (first) await loadFlow(first);
     else renderInspector();
     loadMedia();
+    loadResources();   // 智能体 / 知识库 / 技能 / MCP / 工具（异步，不阻塞画布）
+    switchView("agents");   // 智能体优先：落地页是智能体主页
   } catch (e) {
     toast(`初始化失败：${e.message}`, "err");
   }
