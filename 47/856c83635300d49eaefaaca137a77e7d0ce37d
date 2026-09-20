@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-09-20-flow-studio-governance-design.md
+  s_5f3cf1bfbef6cf::t_fc80c0bc3bfad7 1-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "47856c83635300d49eaefaaca137a77e7d0ce37d",
+  "prompts": {},
+  "sessions": {
+    "s_5f3cf1bfbef6cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0be1c-dfff-7900-9f60-ca366f73af13",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
