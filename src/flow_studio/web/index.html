@@ -4,12 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Flow Studio · 智能体平台</title>
-<link rel="stylesheet" href="style.css?v=14">
+<link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
 
+<main id="auth-shell" class="auth-shell">
+  <section class="auth-panel">
+    <div class="auth-brand"><span class="mark">◆</span><span>Flow Studio</span></div>
+    <h1 id="auth-title">正在检查实例</h1>
+    <p id="auth-subtitle">请稍候</p>
+    <form id="auth-form"></form>
+  </section>
+</main>
+
 <!-- 全局导航：智能体是核心，工作流（画布）是编排工具 -->
-<header id="global-nav">
+<header id="global-nav" class="app-authenticated">
   <div class="brand"><span class="mark">◆</span><span class="brand-name">Flow Studio</span></div>
   <nav class="nav-tabs">
     <button id="nav-agents" class="on">智能体</button>
@@ -17,16 +26,22 @@
   </nav>
   <div class="spacer"></div>
   <button id="btn-res" title="知识库 / 技能 / MCP / 记忆 / 评测">资源库</button>
+  <button id="btn-gov" title="版本 / 审批 / 成员 / 策略 / 审计">治理</button>
+  <select id="workspace-select" title="当前 Workspace"></select>
+  <span id="user-role" class="role-badge"></span>
+  <span id="user-name"></span>
+  <button id="btn-logout" class="icon-btn" title="退出登录">↪</button>
 </header>
 
 <!-- 工作流画布视图的工具栏（仅在画布视图显示） -->
-<header id="topbar" class="view-hidden">
+<header id="topbar" class="view-hidden app-authenticated">
   <button id="btn-palette" class="mobile-only" title="节点面板">＋节点</button>
   <select id="flow-select" title="选择流程"></select>
   <button id="btn-new" title="新建空白流程">新建</button>
   <button id="btn-del" class="danger" title="删除当前流程">删除</button>
   <span class="sep"></span>
   <button id="btn-save" class="primary" title="保存流程（⌘S）">保存</button>
+  <span id="flow-governance"></span>
   <button id="btn-run" class="primary" title="运行当前流程">▶ 运行</button>
   <span id="run-status"></span>
   <button id="btn-models" title="配置分镜 LLM / 文生图 / 图生视频模型">模型</button>
@@ -40,7 +55,7 @@
 </header>
 
 <!-- 智能体主页（默认视图） -->
-<section id="agents-view">
+<section id="agents-view" class="app-authenticated">
   <div id="agents-hero">
     <div>
       <h1>智能体</h1>
@@ -52,7 +67,7 @@
 </section>
 
 <!-- 工作流画布视图 -->
-<div id="main" class="view-hidden">
+<div id="main" class="view-hidden app-authenticated">
   <aside id="palette">
     <button id="palette-close" class="drawer-close mobile-only" title="收起">×</button>
     <h3>节点</h3>
@@ -122,9 +137,16 @@
   <div id="res-body"></div>
 </aside>
 
+<aside id="gov-panel">
+  <button id="gov-close" class="drawer-close" title="收起">×</button>
+  <h3>治理中心</h3>
+  <div id="gov-tabs"></div>
+  <div id="gov-body"></div>
+</aside>
+
 <div id="modal-mask"><div class="modal" id="modal"></div></div>
 <div id="toast"></div>
 
-<script src="app.js?v=15"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>

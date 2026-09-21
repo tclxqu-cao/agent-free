@@ -14,6 +14,8 @@ const NODE_W = 224, NODE_H_DEFAULT = 58, CULL_MARGIN = 320;
 ["gesturestart", "gesturechange", "gestureend"].forEach(t =>
   document.addEventListener(t, e => e.preventDefault()));
 const state = {
+  me: null, csrf: "", workspaceId: localStorage.getItem("flow-studio-workspace") || "",
+  booted: false, govTab: "overview", govResource: null, policy: null,
   nodeTypes: {}, agents: [], flows: [],
   graph: null,            // 当前流程（纯 JSON）
   sel: null,              // {kind:'node'|'edge', id}
@@ -48,15 +50,120 @@ const svgNS = "http://www.w3.org/2000/svg";
 
 /* ================= API ================= */
 async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  const rawBody = opts.body instanceof File || opts.body instanceof Blob;
+  if (!rawBody) headers["Content-Type"] = "application/json";
+  if (state.workspaceId) headers["X-Workspace-ID"] = state.workspaceId;
+  if (state.csrf && ["POST", "PUT", "PATCH", "DELETE"].includes(opts.method || "GET"))
+    headers["X-CSRF-Token"] = state.csrf;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" }, ...opts,
-    body: opts.body instanceof File || opts.body instanceof Blob
+    ...opts, headers,
+    body: rawBody
       ? opts.body : (opts.body ? JSON.stringify(opts.body) : undefined),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || data.error || res.statusText);
+  if (!res.ok) {
+    const error = new Error(data.detail || data.error || res.statusText);
+    error.code = data.code || `http_${res.status}`;
+    error.status = res.status;
+    error.policy = data.policy;
+    if (res.status === 401 && !path.startsWith("/api/auth/")) renderLogin();
+    throw error;
+  }
   return data;
 }
+
+function can(capability) {
+  const caps = state.me?.capabilities || [];
+  return caps.includes("*") || caps.includes(capability);
+}
+
+function authForm(mode) {
+  const setup = mode === "setup";
+  $("#auth-title").textContent = setup ? "初始化管理员" : "登录 Flow Studio";
+  $("#auth-subtitle").textContent = setup
+    ? "创建首个 owner 账号，现有资产会进入 Default Workspace。"
+    : "使用本机账号进入你的 Workspace。";
+  $("#auth-form").innerHTML = `
+    ${setup ? '<label>显示名称<input id="auth-display" autocomplete="name" required></label>' : ""}
+    <label>用户名<input id="auth-user" autocomplete="username" pattern="[A-Za-z0-9_-]+" required></label>
+    <label>密码<input id="auth-pass" type="password" minlength="10" autocomplete="${setup ? "new-password" : "current-password"}" required></label>
+    <div id="auth-error" class="form-error"></div>
+    <button class="primary" type="submit">${setup ? "创建 owner" : "登录"}</button>`;
+  $("#auth-form").onsubmit = async e => {
+    e.preventDefault();
+    const submit = e.submitter; submit.disabled = true;
+    try {
+      const data = await api(setup ? "/api/setup" : "/api/auth/login", {
+        method: "POST", body: {
+          username: $("#auth-user").value.trim(), password: $("#auth-pass").value,
+          ...(setup ? { display_name: $("#auth-display").value.trim() } : {}),
+        }});
+      state.csrf = data.csrf_token;
+      state.workspaceId = data.workspace_id || data.workspaces?.[0]?.workspace_id || "default";
+      localStorage.setItem("flow-studio-workspace", state.workspaceId);
+      await enterApplication();
+    } catch (error) {
+      $("#auth-error").textContent = error.message;
+    } finally { submit.disabled = false; }
+  };
+  document.body.classList.remove("authenticated");
+  setTimeout(() => $("#auth-user")?.focus(), 0);
+}
+function renderSetup() { authForm("setup"); }
+function renderLogin() { state.me = null; state.csrf = ""; authForm("login"); }
+
+async function enterApplication() {
+  const me = await api("/api/me");
+  state.me = me; state.csrf = me.csrf_token;
+  state.workspaceId = me.workspace.workspace_id;
+  localStorage.setItem("flow-studio-workspace", state.workspaceId);
+  $("#workspace-select").innerHTML = me.workspaces.map(w =>
+    `<option value="${esc(w.workspace_id)}">${esc(w.name)}</option>`).join("");
+  $("#workspace-select").value = state.workspaceId;
+  $("#user-role").textContent = me.workspace.role;
+  $("#user-name").textContent = me.user.display_name;
+  document.body.classList.add("authenticated");
+  applyPermissions();
+  await loadApplicationData();
+}
+
+function applyPermissions() {
+  const writable = can("resource.write");
+  ["#agents-new", "#btn-new", "#btn-del", "#btn-save", "#btn-models", "#media-upload-btn"]
+    .forEach(selector => { const el = $(selector); if (el) el.hidden = !writable; });
+  $("#btn-gov").hidden = !(can("release.approve") || can("audit.read") || writable);
+}
+
+async function loadApplicationData() {
+  state.graph = null; state.lastRun = null; state.govResource = null;
+  state.kbDocs = {}; state.mcpTools = {}; state.chatTarget = null;
+  ["#gov-panel", "#res-panel", "#media-panel", "#chat-panel"]
+    .forEach(selector => $(selector)?.classList.remove("open"));
+  [state.nodeTypes, state.agents, state.policy] = await Promise.all([
+    api("/api/node-types"), api("/api/agents"), api("/api/governance/policy")]);
+  renderPalette();
+  const first = await loadFlowList();
+  if (first) await loadFlow(first);
+  else { state.graph = null; renderInspector(); renderFlowGovernance(); }
+  await Promise.allSettled([loadMedia(), loadResources()]);
+  switchView("agents");
+  state.booted = true;
+}
+
+$("#workspace-select").onchange = async e => {
+  state.workspaceId = e.target.value;
+  localStorage.setItem("flow-studio-workspace", state.workspaceId);
+  try { await enterApplication(); }
+  catch (error) { showApiError(error, "切换 Workspace 失败"); }
+};
+$("#btn-logout").onclick = async () => {
+  try { await api("/api/auth/logout", { method: "POST" }); }
+  catch { /* 本地会话失效时仍回到登录页 */ }
+  localStorage.removeItem("flow-studio-workspace");
+  state.workspaceId = ""; state.booted = false;
+  renderLogin();
+};
 
 /* ================= 提示 / 弹窗 ================= */
 let toastTimer;
@@ -70,6 +177,363 @@ function openModal(html) { $("#modal").innerHTML = html; $("#modal-mask").classL
 function closeModal() { $("#modal-mask").classList.remove("open"); }
 $("#modal-mask").addEventListener("mousedown", e => { if (e.target.id === "modal-mask") closeModal(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+function showApiError(error, fallback = "操作失败") {
+  const violations = error?.policy?.violations || [];
+  const detail = violations.map(v => `${v.message}${v.path ? `（${v.path}）` : ""}`).join("；");
+  toast(`${fallback}：${detail || error?.message || "未知错误"}`, "err");
+}
+
+function modalValue({ title, label, value = "", required = false, multiline = false,
+                      confirmText = "确定", placeholder = "" }) {
+  return new Promise(resolve => {
+    openModal(`<h2>${esc(title)}</h2>
+      <div class="field"><label>${esc(label)}</label>
+        ${multiline
+          ? `<textarea id="prompt-value" rows="4" placeholder="${esc(placeholder)}">${esc(value)}</textarea>`
+          : `<input id="prompt-value" value="${esc(value)}" placeholder="${esc(placeholder)}">`}
+      </div>
+      <div class="btn-row"><button id="prompt-cancel">取消</button>
+        <button id="prompt-ok" class="primary">${esc(confirmText)}</button></div>`);
+    $("#prompt-value").focus();
+    $("#prompt-cancel").onclick = () => { closeModal(); resolve(null); };
+    $("#prompt-ok").onclick = () => {
+      const result = $("#prompt-value").value.trim();
+      if (required && !result) return toast(`${label}不能为空`, "err");
+      closeModal(); resolve(result);
+    };
+  });
+}
+
+function promptInputs(flow = state.graph) {
+  return new Promise(resolve => {
+    const inputs = flow?.nodes?.find(n => n.type === "start")?.params?.inputs || [];
+    const rows = inputs.map(item => {
+      const key = typeof item === "string" ? item : item.key;
+      const value = typeof item === "string" ? "" : (item.default ?? "");
+      return `<div class="field"><label>${esc(key)}</label>
+        <input data-inkey="${esc(key)}" value="${esc(value)}"></div>`;
+    }).join("");
+    openModal(`<h2>运行输入</h2>
+      ${rows || '<div class="empty-tip">该流程无输入参数。</div>'}
+      <div class="btn-row"><button id="inputs-cancel">取消</button>
+        <button id="inputs-ok" class="primary">继续</button></div>`);
+    $("#inputs-cancel").onclick = () => { closeModal(); resolve(null); };
+    $("#inputs-ok").onclick = () => {
+      const values = {};
+      $$("#modal [data-inkey]").forEach(el => {
+        const raw = el.value.trim();
+        values[el.dataset.inkey] = raw === "true" ? true : raw === "false" ? false : raw;
+      });
+      closeModal(); resolve(values);
+    };
+  });
+}
+
+async function governanceAction(resourceType, resourceId, version, action, body = {}) {
+  return api(`/api/governance/resources/${encodeURIComponent(resourceType)}/` +
+    `${encodeURIComponent(resourceId)}/versions/${version}/${action}`,
+    { method: "POST", body });
+}
+
+async function refreshGovernedResource(resourceType, resourceId) {
+  if (resourceType === "agent") await loadResources();
+  else {
+    await loadFlowList(resourceId);
+    if (state.graph?.id === resourceId) await loadFlow(resourceId);
+  }
+}
+
+async function submitResource(resourceType, resourceId, version) {
+  if (!version) return toast("没有可提交的草稿版本", "err");
+  const reason = await modalValue({ title: "提交审批", label: "变更说明（可选）",
+    multiline: true, confirmText: "提交" });
+  if (reason === null) return;
+  try {
+    await governanceAction(resourceType, resourceId, version, "submit", { reason });
+    await refreshGovernedResource(resourceType, resourceId);
+    if ($("#gov-panel").classList.contains("open")) await renderGovernancePanel();
+    toast("已提交审批", "ok");
+  } catch (error) { showApiError(error, "提交失败"); }
+}
+
+function openVersions(resourceType, resourceId) {
+  state.govResource = { resourceType, resourceId };
+  openGovernance("versions");
+}
+
+const GOV_TABS = [
+  ["overview", "概览", () => true],
+  ["versions", "版本", () => Boolean(state.govResource)],
+  ["approvals", "审批", () => can("release.approve")],
+  ["members", "成员", () => can("member.manage")],
+  ["policy", "策略", () => can("resource.read")],
+  ["audit", "审计", () => can("audit.read")],
+];
+
+function openGovernance(tab = "overview") {
+  state.govTab = tab;
+  ["#palette", "#inspector", "#media-panel", "#res-panel"]
+    .forEach(selector => $(selector)?.classList.remove("open"));
+  $("#gov-panel").classList.add("open");
+  renderGovernancePanel();
+}
+$("#btn-gov").onclick = () => openGovernance("overview");
+$("#gov-close").onclick = () => $("#gov-panel").classList.remove("open");
+
+async function renderGovernancePanel() {
+  const tabs = GOV_TABS.filter(([, , visible]) => visible());
+  if (!tabs.some(([key]) => key === state.govTab)) state.govTab = "overview";
+  $("#gov-tabs").innerHTML = tabs.map(([key, label]) =>
+    `<button class="chip ${state.govTab === key ? "on" : ""}" data-gtab="${key}">${label}</button>`).join("");
+  $$("#gov-tabs [data-gtab]").forEach(button => button.onclick = () => {
+    state.govTab = button.dataset.gtab; renderGovernancePanel();
+  });
+  const body = $("#gov-body");
+  body.innerHTML = '<div class="res-empty">加载中…</div>';
+  try {
+    await ({ overview: renderGovOverview, versions: renderGovVersions,
+      approvals: renderGovApprovals, members: renderGovMembers,
+      policy: renderGovPolicy, audit: renderGovAudit })[state.govTab](body);
+  } catch (error) {
+    body.innerHTML = `<div class="res-empty">${esc(error.message)}</div>`;
+  }
+}
+
+async function renderGovOverview(body) {
+  let approvals = [];
+  if (can("release.approve")) approvals = await api("/api/governance/approvals");
+  body.innerHTML = `
+    <div class="gov-summary">
+      <div><b>${esc(state.me.workspace.name)}</b><span>当前 Workspace</span></div>
+      <div><b>${state.aiAgents.length}</b><span>智能体</span></div>
+      <div><b>${state.flows.length}</b><span>流程</span></div>
+      <div><b>${approvals.length}</b><span>待处理版本</span></div>
+    </div>
+    <div class="gov-section"><h4>存储边界</h4>
+      <div class="res-card"><div class="res-kv"><b>治理元数据</b><span>SQLite</span></div>
+        <div class="res-kv"><b>Workspace 资产</b><span>独立文件目录</span></div>
+        <div class="res-kv"><b>正式运行</b><span>仅使用已发布版本</span></div></div>
+    </div>
+    ${can("workspace.manage") ? `<div class="gov-section"><h4>Workspace</h4>
+      <button id="workspace-new" class="primary">新建 Workspace</button></div>` : ""}`;
+  if ($("#workspace-new")) $("#workspace-new").onclick = createWorkspaceModal;
+}
+
+function createWorkspaceModal() {
+  openModal(`<h2>新建 Workspace</h2>
+    <div class="field"><label>名称</label><input id="ws-name"></div>
+    <div class="field"><label>ID（字母数字-_）</label><input id="ws-id"></div>
+    <div class="btn-row"><button id="ws-cancel">取消</button>
+      <button id="ws-ok" class="primary">创建</button></div>`);
+  $("#ws-cancel").onclick = closeModal;
+  $("#ws-ok").onclick = async () => {
+    const name = $("#ws-name").value.trim();
+    const id = $("#ws-id").value.trim() || name.toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!name || !id) return toast("请填写名称和有效 ID", "err");
+    try {
+      await api("/api/workspaces", { method: "POST", body: { id, name } });
+      closeModal(); state.workspaceId = id;
+      localStorage.setItem("flow-studio-workspace", id);
+      await enterApplication(); toast("Workspace 已创建", "ok");
+    } catch (error) { showApiError(error, "创建失败"); }
+  };
+}
+
+function versionActionsHtml(version) {
+  const actions = [];
+  if (version.status === "draft" && can("resource.write")) actions.push(["submit", "提交"]);
+  if (version.status === "pending" && can("release.approve")) {
+    actions.push(["approve", "批准"], ["reject", "拒绝"]);
+  }
+  const publishable = version.status === "approved" ||
+    (!state.policy?.require_approval && ["draft", "pending"].includes(version.status));
+  if (publishable && can("release.publish"))
+    actions.push(["publish", "发布"]);
+  if (version.published_at && version.published_version !== version.version_no && can("release.rollback"))
+    actions.push(["rollback", "回滚"]);
+  if (version.action !== "delete" && can("runtime.preview")) actions.push(["preview", "预览"]);
+  return actions.map(([action, label]) =>
+    `<button data-vact="${action}"${action === "reject" ? ' class="danger"' : ""}>${label}</button>`).join("");
+}
+
+function versionRow(version) {
+  return `<div class="gov-row" data-version="${version.version_no}"
+    data-resource-type="${esc(version.resource_type)}" data-resource-id="${esc(version.resource_id)}">
+    <div class="gov-main"><div class="gov-title">
+      <span class="status-badge" data-status="${esc(version.status)}">v${version.version_no} ${esc(version.status)}</span>
+      <span>${esc(version.resource_type)} · ${esc(version.resource_id)}</span>
+      ${version.published_version === version.version_no ? '<span class="chip on">当前发布</span>' : ""}
+    </div><div class="gov-meta">${esc(version.action)} · ${esc(version.creator_name || version.created_by || "")} · ${esc(formatTime(version.created_at))}${version.reason ? ` · ${esc(version.reason)}` : ""}</div></div>
+    <div class="gov-actions">${versionActionsHtml(version)}</div></div>`;
+}
+
+async function renderGovVersions(body) {
+  const { resourceType, resourceId } = state.govResource;
+  const versions = await api(`/api/governance/resources/${encodeURIComponent(resourceType)}/` +
+    `${encodeURIComponent(resourceId)}/versions`);
+  body.innerHTML = `<div class="res-actions"><button id="versions-back">← 概览</button>
+    <b>${esc(resourceType)} · ${esc(resourceId)}</b></div>
+    ${versions.map(versionRow).join("") || '<div class="res-empty">暂无版本。</div>'}`;
+  $("#versions-back").onclick = () => { state.govTab = "overview"; renderGovernancePanel(); };
+  bindVersionActions(body, versions);
+}
+
+async function renderGovApprovals(body) {
+  const versions = await api("/api/governance/approvals");
+  body.innerHTML = versions.map(versionRow).join("") || '<div class="res-empty">没有待处理版本。</div>';
+  bindVersionActions(body, versions);
+}
+
+function bindVersionActions(body, versions) {
+  body.querySelectorAll("[data-version]").forEach(row => {
+    const version = versions.find(v => v.version_no === Number(row.dataset.version)
+      && v.resource_type === row.dataset.resourceType
+      && v.resource_id === row.dataset.resourceId);
+    if (!version) return;
+    row.querySelectorAll("[data-vact]").forEach(button => button.onclick = async () => {
+      const action = button.dataset.vact;
+      if (action === "preview") return previewVersion(version);
+      const required = action === "reject" || action === "rollback";
+      const reason = await modalValue({ title: `${button.textContent} v${version.version_no}`,
+        label: required ? "原因" : "说明（可选）", required, multiline: true,
+        confirmText: button.textContent });
+      if (reason === null) return;
+      try {
+        await governanceAction(version.resource_type, version.resource_id,
+          version.version_no, action, { reason });
+        await refreshGovernedResource(version.resource_type, version.resource_id);
+        await renderGovernancePanel(); toast(`${button.textContent}完成`, "ok");
+      } catch (error) { showApiError(error, `${button.textContent}失败`); }
+    });
+  });
+}
+
+async function previewVersion(version) {
+  let body;
+  if (version.resource_type === "flow") {
+    const inputs = await promptInputs(version.snapshot); if (inputs === null) return;
+    body = { inputs };
+  } else {
+    const message = await modalValue({ title: `预览智能体 v${version.version_no}`,
+      label: "消息", required: true, multiline: true });
+    if (message === null) return;
+    body = { message };
+  }
+  try {
+    const result = await governanceAction(version.resource_type, version.resource_id,
+      version.version_no, "preview", body);
+    if (version.resource_type === "flow") await animateRun(result);
+    else openModal(`<h2>预览结果</h2><div class="res-snippet">${esc(result.text || result.error || "（空）")}</div>
+      <div class="btn-row"><button id="preview-close" class="primary">关闭</button></div>`),
+      $("#preview-close").onclick = closeModal;
+    toast("预览完成", "ok");
+  } catch (error) { showApiError(error, "预览失败"); }
+}
+
+async function renderGovMembers(body) {
+  const workspaceId = state.workspaceId;
+  const members = await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/members`);
+  body.innerHTML = `<div class="res-actions"><button id="member-add" class="primary">添加成员</button></div>
+    ${members.map(member => `<div class="gov-row" data-member="${esc(member.user_id)}">
+      <div class="gov-main"><div class="gov-title">${esc(member.display_name)} <span class="role-badge">${esc(member.role)}</span></div>
+        <div class="gov-meta">${esc(member.username)}</div></div>
+      <div class="gov-actions">${member.role === "owner" ? "" : `
+        <select data-role>${["admin", "editor", "viewer"].map(role =>
+          `<option value="${role}" ${member.role === role ? "selected" : ""}>${role}</option>`).join("")}</select>
+        <button data-member-save>保存</button><button data-member-remove class="danger">移除</button>`}</div>
+    </div>`).join("")}`;
+  $("#member-add").onclick = addMemberModal;
+  body.querySelectorAll("[data-member]").forEach(row => {
+    const userId = row.dataset.member;
+    row.querySelector("[data-member-save]")?.addEventListener("click", async () => {
+      try {
+        await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+          { method: "PUT", body: { role: row.querySelector("[data-role]").value } });
+        await renderGovMembers(body); toast("角色已更新", "ok");
+      } catch (error) { showApiError(error, "更新失败"); }
+    });
+    row.querySelector("[data-member-remove]")?.addEventListener("click", async () => {
+      if (!confirm("确认移除该成员？")) return;
+      try {
+        await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+          { method: "DELETE" });
+        await renderGovMembers(body); toast("成员已移除", "ok");
+      } catch (error) { showApiError(error, "移除失败"); }
+    });
+  });
+}
+
+function addMemberModal() {
+  openModal(`<h2>添加成员</h2>
+    <div class="field"><label>用户名</label><input id="member-user"></div>
+    <div class="field"><label>显示名称</label><input id="member-name"></div>
+    <div class="field"><label>初始密码（新用户至少 10 位）</label><input id="member-pass" type="password"></div>
+    <div class="field"><label>角色</label><select id="member-role">
+      <option value="viewer">viewer</option><option value="editor">editor</option>
+      ${state.me.workspace.role === "owner" ? '<option value="admin">admin</option>' : ""}</select></div>
+    <div class="btn-row"><button id="member-cancel">取消</button><button id="member-ok" class="primary">添加</button></div>`);
+  $("#member-cancel").onclick = closeModal;
+  $("#member-ok").onclick = async () => {
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(state.workspaceId)}/members`, {
+        method: "POST", body: { username: $("#member-user").value.trim(),
+          display_name: $("#member-name").value.trim(), password: $("#member-pass").value,
+          role: $("#member-role").value }});
+      closeModal(); await renderGovernancePanel(); toast("成员已添加", "ok");
+    } catch (error) { showApiError(error, "添加失败"); }
+  };
+}
+
+const policyList = value => (value || []).join("\n");
+const parsePolicyList = value => value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
+async function renderGovPolicy(body) {
+  const policy = await api("/api/governance/policy");
+  const editable = can("policy.manage");
+  body.innerHTML = `<div class="policy-grid">
+    <div class="field"><label>允许的模型（每行一个，空=不限制）</label><textarea id="pol-models" rows="3" ${editable ? "" : "disabled"}>${esc(policyList(policy.allowed_models))}</textarea></div>
+    <div class="field"><label>禁用工具</label><textarea id="pol-tools" rows="3" ${editable ? "" : "disabled"}>${esc(policyList(policy.denied_tools))}</textarea></div>
+    <div class="field"><label>禁用 MCP</label><textarea id="pol-mcp" rows="3" ${editable ? "" : "disabled"}>${esc(policyList(policy.denied_mcp_servers))}</textarea></div>
+    <div class="field"><label>允许的流程节点（空=不限制）</label><textarea id="pol-nodes" rows="3" ${editable ? "" : "disabled"}>${esc(policyList(policy.allowed_flow_node_types))}</textarea></div>
+    <div class="field wide"><label>允许的 HTTP 主机</label><textarea id="pol-hosts" rows="2" ${editable ? "" : "disabled"}>${esc(policyList(policy.allowed_http_hosts))}</textarea></div>
+    <div class="field"><label>Agent 最大步数</label><input id="pol-steps" type="number" min="1" max="30" value="${policy.max_agent_steps}" ${editable ? "" : "disabled"}></div>
+    <div class="field"><label>必需评测集 ID</label><input id="pol-suite" value="${esc(policy.required_eval_suite_id)}" ${editable ? "" : "disabled"}></div>
+    <div class="field"><label>最低通过率（0-1）</label><input id="pol-rate" type="number" min="0" max="1" step="0.01" value="${policy.min_eval_pass_rate}" ${editable ? "" : "disabled"}></div>
+    <div class="field"><label><input id="pol-approval" type="checkbox" style="width:auto" ${policy.require_approval ? "checked" : ""} ${editable ? "" : "disabled"}> 发布前必须审批</label></div>
+  </div>${editable ? '<div class="btn-row"><button id="policy-save" class="primary">保存策略</button></div>' : ""}`;
+  if ($("#policy-save")) $("#policy-save").onclick = async () => {
+    const next = { allowed_models: parsePolicyList($("#pol-models").value),
+      denied_tools: parsePolicyList($("#pol-tools").value),
+      denied_mcp_servers: parsePolicyList($("#pol-mcp").value),
+      allowed_flow_node_types: parsePolicyList($("#pol-nodes").value),
+      allowed_http_hosts: parsePolicyList($("#pol-hosts").value),
+      max_agent_steps: Number($("#pol-steps").value),
+      require_approval: $("#pol-approval").checked,
+      required_eval_suite_id: $("#pol-suite").value.trim(),
+      min_eval_pass_rate: Number($("#pol-rate").value) };
+    try { state.policy = await api("/api/governance/policy", { method: "PUT", body: next });
+      toast("策略已保存", "ok"); }
+    catch (error) { showApiError(error, "保存失败"); }
+  };
+}
+
+async function renderGovAudit(body) {
+  const events = await api("/api/governance/audit?limit=200");
+  body.innerHTML = events.map(event => `<div class="gov-row">
+    <div class="gov-main"><div class="gov-title">${esc(event.event_type)}
+      <span class="status-badge" data-status="${event.outcome === "success" ? "published" : "rejected"}">${esc(event.outcome)}</span></div>
+      <div class="gov-meta">${esc(formatTime(event.created_at))} · ${esc(event.username || "system")}` +
+        `${event.resource_id ? ` · ${esc(event.resource_type)}:${esc(event.resource_id)}${event.version_no ? ` v${event.version_no}` : ""}` : ""}</div>
+      ${Object.keys(event.details || {}).length ? `<div class="res-snippet">${esc(fmtJson(event.details))}</div>` : ""}</div>
+    </div>`).join("") || '<div class="res-empty">暂无审计事件。</div>';
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
 
 /* ================= 几何 ================= */
 const nodeById = id => state.graph?.nodes.find(n => n.id === id);
@@ -1108,7 +1572,8 @@ async function loadFlowList(selectId) {
 }
 
 async function loadFlow(id) {
-  if (!id) { state.graph = null; state.lastRun = null; select(null); renderWorld(); renderInspector(); return; }
+  if (!id) { state.graph = null; state.lastRun = null; select(null); renderWorld();
+    renderInspector(); renderFlowGovernance(); return; }
   const data = await api(`/api/flows/${encodeURIComponent(id)}`);
   data._saved = true;
   state.graph = data;
@@ -1116,6 +1581,7 @@ async function loadFlow(id) {
   state.sel = null;
   state.view = { x: 40, y: 30, s: 1 };
   renderWorld(); renderInspector();
+  renderFlowGovernance();
   fitView();
   closeDrawers();
   $("#run-panel").classList.remove("open");
@@ -1132,7 +1598,8 @@ async function saveFlow() {
     saved._saved = true;
     state.graph = saved;
     state.dirty = false;
-    toast("已保存 ✅", "ok");
+    renderFlowGovernance();
+    toast("草稿已保存", "ok");
     await loadFlowList(g.id);
     select(null);
   } catch (e) { toast(`保存失败：${e.message}`, "err"); }
@@ -1143,6 +1610,28 @@ function graphBody() {
            nodes: (g.nodes || []).map(n => ({ id: n.id, type: n.type, label: n.label,
                                               params: n.params || {}, pos: n.pos || {} })),
            edges: (g.edges || []).map(e => ({ from: e.from, to: e.to, ...(e.branch ? { branch: e.branch } : {}) })) };
+}
+
+function renderFlowGovernance() {
+  const box = $("#flow-governance");
+  if (!box) return;
+  const gov = state.graph?._governance;
+  if (!gov) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="status-badge" data-status="${esc(gov.status)}">v${gov.version} ${esc(gov.status)}</span>
+    ${can("resource.write") && gov.status === "draft" ? '<button id="flow-submit">提交审批</button>' : ""}
+    ${can("runtime.preview") && gov.status !== "published" ? '<button id="flow-preview">预览</button>' : ""}
+    <button id="flow-versions">版本</button>`;
+  $("#flow-submit")?.addEventListener("click", () =>
+    submitResource("flow", state.graph.id, gov.version));
+  $("#flow-preview")?.addEventListener("click", async () => {
+    const inputs = await promptInputs(); if (inputs === null) return;
+    try {
+      const run = await governanceAction("flow", state.graph.id, gov.version,
+        "preview", { inputs });
+      await animateRun(run); toast("预览运行完成", "ok");
+    } catch (error) { showApiError(error, "预览失败"); }
+  });
+  $("#flow-versions").onclick = () => openVersions("flow", state.graph.id);
 }
 
 /* 新建 / 删除流程 */
@@ -1179,7 +1668,7 @@ $("#btn-del").onclick = async () => {
   await api(`/api/flows/${encodeURIComponent(id)}`, { method: "DELETE" });
   await loadFlowList();
   await loadFlow($("#flow-select").value);
-  toast("已删除", "ok");
+  toast("已生成删除草稿", "ok");
 };
 $("#btn-save").onclick = saveFlow;
 $("#flow-select").onchange = e => loadFlow(e.target.value);
@@ -1354,8 +1843,9 @@ function renderAgentsHome() {
         <span class="agent-ico">✨</span>
         <div class="agent-title">
           <b>${esc(a.name)}</b>
-          <span class="agent-id">${esc(a.id)} · ${a.flow_id ? "流程编排" : "对话式"}</span>
+          <span class="agent-id">${esc(a.id)} · ${a.flow_id ? "流程编排" : "对话式"} · v${a._governance?.version || "-"}</span>
         </div>
+        <span class="status-badge" data-status="${esc(a._governance?.status || "published")}">${esc(a._governance?.status || "published")}</span>
       </div>
       <p class="agent-desc">${esc(a.description || "")}</p>
       <div class="res-tags">${[
@@ -1368,20 +1858,25 @@ function renderAgentsHome() {
         `<span class="chip">${t}</span>`).join("")}</div>
       <div class="agent-actions">
         <button class="primary" data-act="chat">▶ 对话</button>
-        <button data-act="edit">编辑</button>
-        <button data-act="del" class="danger">删除</button>
+        ${can("resource.write") ? '<button data-act="edit">编辑</button>' : ""}
+        ${can("resource.write") && a._governance?.status === "draft" ? '<button data-act="submit">提交审批</button>' : ""}
+        <button data-act="versions">版本</button>
+        ${can("resource.write") ? '<button data-act="del" class="danger">删除</button>' : ""}
       </div>
     </div>`).join("");
   $$("#agents-grid .agent-card").forEach(card => {
     const id = card.dataset.aid;
     card.querySelector('[data-act="chat"]').onclick = () => openAgentChat(id);
-    card.querySelector('[data-act="edit"]').onclick = () =>
-      agentEditModal(state.aiAgents.find(a => a.id === id));
-    card.querySelector('[data-act="del"]').onclick = async () => {
+    card.querySelector('[data-act="edit"]')?.addEventListener("click", () =>
+      agentEditModal(state.aiAgents.find(a => a.id === id)));
+    card.querySelector('[data-act="submit"]')?.addEventListener("click", () =>
+      submitResource("agent", id, state.aiAgents.find(a => a.id === id)?._governance?.version));
+    card.querySelector('[data-act="versions"]').onclick = () => openVersions("agent", id);
+    card.querySelector('[data-act="del"]')?.addEventListener("click", async () => {
       if (!confirm(`确认删除智能体「${id}」？`)) return;
       await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
-      await loadResources(); toast("已删除", "ok");
-    };
+      await loadResources(); toast("已生成删除草稿", "ok");
+    });
   });
 }
 $("#agents-new").onclick = () => agentEditModal(null);
@@ -1725,6 +2220,11 @@ function renderResPanel() {
   ({ agents: renderResAgents, kb: renderResKb, skills: renderResSkills,
      mcp: renderResMcp, memory: renderResMemory, evals: renderResEvals
   })[state.resTab](body);
+  if (!can("resource.write")) requestAnimationFrame(() => {
+    $$("#res-body button.danger, #res-body [data-act='edit'], #res-body [data-act='del'], " +
+      "#res-body [data-del], #res-agent-new, #res-kb-new, #res-skill-new, #res-mcp-new, " +
+      "#mem-add, #ev-suite-new, #ev-case-add").forEach(el => { el.hidden = true; });
+  });
 }
 
 /* ---- 智能体 ---- */
@@ -2149,41 +2649,22 @@ async function renderResMemory(body) {
 }
 
 /* ================= 运行 ================= */
-$("#btn-run").onclick = () => {
+$("#btn-run").onclick = async () => {
   if (!state.graph) return;
-  const inputs = state.graph.nodes.find(n => n.type === "start")?.params?.inputs || [];
-  const rows = inputs.map(i => {
-    const key = typeof i === "string" ? i : i.key;
-    const def = typeof i === "string" ? "" : (i.default ?? "");
-    return `<div class="field"><label>${esc(key)}</label>
-      <input data-inkey="${esc(key)}" value="${esc(def)}"></div>`;
-  }).join("");
-  openModal(`
-    <h2>运行「${esc(state.graph.name)}」</h2>
-    ${rows || '<div class="empty-tip">该流程无输入参数。</div>'}
-    <div class="btn-row"><button id="run-cancel">取消</button>
-      <button id="run-ok" class="primary">▶ 运行</button></div>`);
-  $("#run-cancel").onclick = closeModal;
-  $("#run-ok").onclick = async () => {
-    const values = {};
-    $$("#modal [data-inkey]").forEach(el => {
-      const v = el.value.trim();
-      values[el.dataset.inkey] = v === "true" ? true : v === "false" ? false : v;
-    });
-    closeModal();
-    closeDrawers();
-    $("#run-status").textContent = "运行中…"; $("#run-status").className = "";
-    try {
-      const run = await api(`/api/flows/${encodeURIComponent(state.graph.id)}/run`,
-        { method: "POST", body: { inputs: values } });
-      $("#run-status").textContent = run.status === "success" ? "✅ 成功" : "❌ 失败";
-      $("#run-status").className = run.status === "success" ? "ok" : "err";
-      await animateRun(run);
-    } catch (e) {
-      $("#run-status").textContent = "❌ 失败"; $("#run-status").className = "err";
-      toast(e.message, "err");
-    }
-  };
+  const values = await promptInputs(state.graph);
+  if (values === null) return;
+  closeDrawers();
+  $("#run-status").textContent = "运行中…"; $("#run-status").className = "";
+  try {
+    const run = await api(`/api/flows/${encodeURIComponent(state.graph.id)}/run`,
+      { method: "POST", body: { inputs: values } });
+    $("#run-status").textContent = run.status === "success" ? "成功" : "失败";
+    $("#run-status").className = run.status === "success" ? "ok" : "err";
+    await animateRun(run);
+  } catch (e) {
+    $("#run-status").textContent = "失败"; $("#run-status").className = "err";
+    showApiError(e, "运行失败");
+  }
 };
 
 /* ================= 意图触发 ================= */
@@ -2290,16 +2771,19 @@ function addNode(type) {
 /* ================= 启动 ================= */
 (async function init() {
   try {
-    [state.nodeTypes, state.agents] = await Promise.all([
-      api("/api/node-types"), api("/api/agents")]);
-    renderPalette();
-    const first = await loadFlowList();
-    if (first) await loadFlow(first);
-    else renderInspector();
-    loadMedia();
-    loadResources();   // 智能体 / 知识库 / 技能 / MCP / 工具（异步，不阻塞画布）
-    switchView("agents");   // 智能体优先：落地页是智能体主页
+    const setup = await api("/api/setup/status");
+    if (!setup.initialized) return renderSetup();
+    try { await enterApplication(); }
+    catch (error) {
+      if (error.status === 403 && state.workspaceId) {
+        state.workspaceId = "";
+        localStorage.removeItem("flow-studio-workspace");
+        try { await enterApplication(); return; } catch { /* 转登录 */ }
+      }
+      renderLogin();
+    }
   } catch (e) {
-    toast(`初始化失败：${e.message}`, "err");
+    renderLogin();
+    $("#auth-error").textContent = `初始化失败：${e.message}`;
   }
 })();

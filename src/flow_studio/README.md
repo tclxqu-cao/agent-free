@@ -11,6 +11,9 @@ uv sync --extra studio          # 安装 web 依赖（fastapi/uvicorn）
 uv run flow-studio              # 启动画布 http://127.0.0.1:8788 并自动打开浏览器
 ```
 
+首次打开会进入实例初始化页，需要创建首个 `owner`（密码至少 10 位）。后续所有
+API、媒体文件和 Web 操作都要求本地登录会话；写操作还必须携带当前会话的 CSRF token。
+
 画布里：
 
 1. 左上选择内置流程 **「应聘 Agent · 模拟数据日检」**，点 **▶ 运行**——
@@ -18,6 +21,60 @@ uv run flow-studio              # 启动画布 http://127.0.0.1:8788 并自动�
 2. 右上输入框说 **「跑一下应聘demo」**——意图路由自动选中流程并执行，弹窗返回完整应聘日报；
 3. 点节点在右侧编辑参数（Agent 节点二级下拉选 `job_agent` 的能力），拖端口连线、
    条件连线双击改分支表达式，⌘S 保存。
+
+## 小团队治理
+
+Flow Studio 按单实例、小团队场景提供完整治理闭环：
+
+- **登录与 RBAC**：`owner / admin / editor / viewer` 四级角色；连续 5 次登录失败会短时锁定账号与来源地址，会话默认 12 小时，可主动退出撤销。
+- **Workspace 多租户**：每个请求显式选择 Workspace，成员、策略、资产、运行记录和审计按 Workspace 隔离。`owner` 可创建 Workspace，`owner/admin` 可管理成员。
+- **不可变版本**：Agent 和 Flow 的每次保存或删除都会产生新草稿版本，历史快照不覆盖。
+- **审批与发布**：编辑者提交，管理员批准/拒绝并发布；存在多个审批人时禁止提交人自批。正式运行始终解析到已发布版本，编辑者可指定版本预览。
+- **回滚**：选择历史已发布版本回滚时会创建一个新的发布版本，保留完整历史，不移动发布指针伪造历史。
+- **统一策略门禁**：提交、预览、发布和正式运行共用策略引擎，可限制模型、工具、MCP、Agent 步数、流程节点、HTTP 主机，并可要求指定评测集达到最低通过率。
+- **追加审计**：登录、成员、策略、版本、运行和迁移事件写入 SQLite 审计表，敏感字段在入库前脱敏。
+
+角色权限：
+
+| 角色 | 读取/正式运行 | 编辑/版本预览/评测 | 审批/发布/回滚 | 成员/审计 | Workspace/策略 |
+|---|---:|---:|---:|---:|---:|
+| viewer | 是 | 否 | 否 | 否 | 否 |
+| editor | 是 | 是 | 否 | 否 | 否 |
+| admin | 是 | 是 | 是 | 是 | 否 |
+| owner | 是 | 是 | 是 | 是 | 是 |
+
+### 混合存储
+
+默认数据根目录是 `data/`，可用 `--data-dir` 指向独立实例目录：
+
+```text
+data/
+├── governance.sqlite             # 用户、成员、会话、策略、版本、发布指针、审计
+└── workspaces/<workspace-id>/    # Flow/Agent JSON、知识库、技能、媒体、运行记录等
+```
+
+首次初始化时，旧 `data/` 资产会**复制**到 `workspaces/default/`，原文件不会移动或删除；
+已存在的 Agent/Flow 会注册为已发布 `v1`。迁移有幂等标记，重复启动不会重复建版本。
+
+备份必须同时包含 `governance.sqlite` 和整个 `workspaces/` 目录。建议停服务后复制；如需在线备份，
+先用 SQLite backup API 取得一致的数据库快照，再复制 Workspace 文件。该模式不提供跨节点一致性、
+外部身份源、KMS 或数据库级行租户隔离，因此定位是可信内网中的小团队单实例，不应直接作为公网企业控制面。
+
+### 认证 API 示例
+
+```bash
+# 首次初始化；已初始化实例改用 /api/auth/login
+curl -c /tmp/flow-studio.cookies -X POST http://127.0.0.1:8788/api/setup \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"owner","display_name":"Owner","password":"change-me-123"}'
+
+# 读取当前身份并从响应取得 csrf_token；之后请求同时带 Cookie、CSRF 和 Workspace
+curl -b /tmp/flow-studio.cookies http://127.0.0.1:8788/api/me \
+  -H 'X-Workspace-ID: default'
+```
+
+下文所有 API 示例均省略这三个认证参数；实际调用需要复用登录 Cookie，写请求添加
+`X-CSRF-Token`，并用 `X-Workspace-ID` 指定当前 Workspace。
 
 ## 节点类型
 
@@ -170,3 +227,4 @@ JSON 兼容 dict（建议带 `text` 字段作为可读摘要，模板节点直�
 
 - `docs/superpowers/specs/2026-09-11-flow-studio-design.md`（编排画布第一版）
 - `docs/superpowers/specs/2026-09-11-flow-video-pipeline-design.md`（视频制作画布）
+- `docs/superpowers/specs/2026-09-20-flow-studio-governance-design.md`（小团队治理与混合存储）

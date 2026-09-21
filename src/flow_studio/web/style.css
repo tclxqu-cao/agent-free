@@ -33,6 +33,8 @@
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; }
 .view-hidden { display: none !important; }
+.app-authenticated { visibility: hidden; }
+body.authenticated .app-authenticated { visibility: visible; }
 body {
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI",
                "Helvetica Neue", Arial, sans-serif;
@@ -96,6 +98,40 @@ textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; line-h
 .nav-tabs button.on { background: rgba(139, 152, 248, .16); color: #c7d0ff;
   box-shadow: inset 0 0 0 1px rgba(139, 152, 248, .3); }
 #global-nav > button { background: transparent; }
+#workspace-select { width: 150px; }
+#user-name { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.role-badge, .status-badge {
+  display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px;
+  border: 1px solid var(--line-2); border-radius: 6px; color: var(--ink-2);
+  font: 11px var(--mono); white-space: nowrap;
+}
+.status-badge[data-status="published"] { color: var(--ok); border-color: var(--ok-line); }
+.status-badge[data-status="draft"] { color: var(--accent-hover); border-color: var(--accent-ring); }
+.status-badge[data-status="pending"], .status-badge[data-status="approved"] {
+  color: var(--warn); border-color: var(--warn-line);
+}
+.status-badge[data-status="rejected"] { color: var(--err); border-color: var(--err-line); }
+.icon-btn { width: 32px; height: 32px; padding: 0; font-size: 17px; }
+
+/* ---------- 初始化 / 登录 ---------- */
+.auth-shell {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  padding: 20px; background: var(--bg);
+}
+body.authenticated .auth-shell { display: none; }
+.auth-panel {
+  width: min(420px, 100%); padding: 28px; border: 1px solid var(--line-2);
+  border-radius: 8px; background: var(--panel); box-shadow: var(--shadow-lg);
+}
+.auth-brand { display: flex; gap: 10px; align-items: center; font-weight: 700; margin-bottom: 24px; }
+.auth-brand .mark { display: grid; place-items: center; width: 28px; height: 28px;
+  border-radius: 7px; background: var(--accent-deep); color: #fff; }
+.auth-panel h1 { font-size: 22px; letter-spacing: 0; margin-bottom: 7px; }
+.auth-panel > p { color: var(--ink-2); line-height: 1.55; margin-bottom: 20px; }
+#auth-form { display: grid; gap: 12px; }
+#auth-form label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; }
+#auth-form button { margin-top: 5px; min-height: 38px; }
+.form-error { min-height: 18px; color: var(--err); font-size: 12px; }
 
 /* ---------- 工作流工具栏（画布视图） ---------- */
 #topbar {
@@ -333,7 +369,7 @@ video.media-thumb { background: #000; }
   box-shadow: -12px 0 32px rgba(0, 0, 0, .5);
 }
 #media-panel.open { display: flex; }
-#media-panel h3, #res-panel h3 { font-size: 14.5px; font-weight: 700; }
+#media-panel h3, #res-panel h3, #gov-panel h3 { font-size: 14.5px; font-weight: 700; }
 #media-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 #media-filters { display: flex; gap: 5px; flex-wrap: wrap; }
 .chip { font-size: 12px; padding: 3.5px 11px; border-radius: 8px; }
@@ -380,7 +416,7 @@ video.media-thumb { background: #000; }
 
 /* ---------- 弹窗 / 提示 ---------- */
 #modal-mask {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, .6); z-index: 50;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .6); z-index: 80;
   display: none; align-items: center; justify-content: center;
   backdrop-filter: blur(3px);
 }
@@ -439,6 +475,36 @@ video.media-thumb { background: #000; }
   box-shadow: -12px 0 32px rgba(0, 0, 0, .5);
 }
 #res-panel.open { display: flex; }
+
+#gov-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(620px, 98vw); z-index: 56;
+  border-left: 1px solid var(--line); padding: 16px; gap: 12px; display: none;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, .5); overflow: hidden;
+}
+#gov-panel.open { display: flex; }
+#gov-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+#gov-body { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+  flex-direction: column; gap: 9px; padding-right: 2px; }
+.gov-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.gov-summary > div { min-width: 0; padding: 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--panel-2); display: grid; gap: 4px; }
+.gov-summary b { font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gov-summary span { color: var(--ink-2); font-size: 11px; }
+.gov-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.gov-row:last-child { border-bottom: 0; }
+.gov-main { min-width: 0; display: grid; gap: 4px; }
+.gov-title { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+.gov-meta { color: var(--ink-2); font-size: 11.5px; word-break: break-word; }
+.gov-actions { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.gov-actions button { padding: 4px 8px; font-size: 11.5px; }
+.gov-section { padding: 4px 0 12px; }
+.gov-section > h4 { margin-bottom: 8px; font-size: 12px; color: var(--ink-2); }
+.policy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.policy-grid .field.wide { grid-column: 1 / -1; }
+#flow-governance { display: inline-flex; align-items: center; gap: 5px; }
 #res-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
 #res-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .res-card {
@@ -579,8 +645,17 @@ video.media-thumb { background: #000; }
 @media (max-width: 860px) {
   #agents-view { padding: 22px 14px 40px; }
   #agents-grid { grid-template-columns: 1fr; }
-  #global-nav { gap: 10px; padding: 8px 10px; }
+  #global-nav { gap: 8px; padding: 8px 10px; overflow-x: auto; flex: none; }
   .brand-name { display: none; }
+  .nav-tabs button { padding: 5px 10px; }
+  #workspace-select { width: 120px; flex: none; }
+  #user-name, #user-role { display: none; }
+  #gov-panel { width: 100vw; padding: 12px; }
+  .gov-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gov-row { grid-template-columns: minmax(0, 1fr); }
+  .gov-actions { justify-content: flex-start; }
+  .policy-grid { grid-template-columns: 1fr; }
+  .policy-grid .field.wide { grid-column: auto; }
 }
 
 /* ---------- 动效克制 ---------- */
