@@ -1,0 +1,33 @@
+docs/superpowers/plans/2026-09-20-flow-studio-governance.md
+  s_5f3cf1bfbef6cf::t_1cc18dad7ba415 1-75,77-249,254-274
+  s_5f3cf1bfbef6cf::t_e4cdc129c9a946 250-252
+  s_5f3cf1bfbef6cf::t_c338b991bddc20 76,253
+tests/test_flow_platform.py
+  s_5f3cf1bfbef6cf::t_dca9f14922320c 74-76
+tests/conftest.py
+  s_5f3cf1bfbef6cf::t_dca9f14922320c 10-26
+tests/test_flow_video.py
+  s_5f3cf1bfbef6cf::t_dca9f14922320c 402,404
+tests/test_flow_server.py
+  s_5f3cf1bfbef6cf::t_a8ecb537af0fb7 65-67
+  s_5f3cf1bfbef6cf::t_dca9f14922320c 8,13
+tests/test_flow_governance.py
+  s_5f3cf1bfbef6cf::t_86180c38c84c74 172
+  s_5f3cf1bfbef6cf::t_1b45669760966d 1-171,173-220
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "de16a7a275efe34c975eefc25d4be1f03626b533",
+  "prompts": {},
+  "sessions": {
+    "s_5f3cf1bfbef6cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0be1c-dfff-7900-9f60-ca366f73af13",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
