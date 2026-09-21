@@ -1,0 +1,35 @@
+src/flow_studio/workspace.py
+  s_5f3cf1bfbef6cf::t_426771e8fbc52e 1-13,15-145,148-198
+  s_5f3cf1bfbef6cf::t_32fd0bc0f3b0f2 14,146-147
+src/flow_studio/policy.py
+  s_5f3cf1bfbef6cf::t_7736abee862f72 1-153
+src/flow_studio/agentrt.py
+  s_5f3cf1bfbef6cf::t_a14f692fe27909 64-65,98-116
+  s_5f3cf1bfbef6cf::t_f2c144fdbaf9f0 17,66-73
+  s_5f3cf1bfbef6cf::t_69f0845fa0946f 117-118
+src/flow_studio/store.py
+  s_5f3cf1bfbef6cf::t_f2c144fdbaf9f0 7,44-50
+src/flow_studio/evals.py
+  s_5f3cf1bfbef6cf::t_f6b154ba9b1683 83,86,98-99,151-164,258-269,287-288
+  s_5f3cf1bfbef6cf::t_32fd0bc0f3b0f2 25-37
+  s_5f3cf1bfbef6cf::t_d15a0b2a12b6fd 38
+src/flow_studio/versioning.py
+  s_5f3cf1bfbef6cf::t_34386c4da2d86a 1-149,153-246
+  s_5f3cf1bfbef6cf::t_e6d63be7909dd2 150-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b8bd22d1023a3a067febbcf4b09f0a58de670d7b",
+  "prompts": {},
+  "sessions": {
+    "s_5f3cf1bfbef6cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0be1c-dfff-7900-9f60-ca366f73af13",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
