@@ -1,0 +1,36 @@
+src/flow_studio/web/style.css
+  s_5f3cf1bfbef6cf::t_7b08cb6e9e83c9 109,488-492,648,650-658
+  s_5f3cf1bfbef6cf::t_42c54d0c6da932 419
+  s_5f3cf1bfbef6cf::t_183c0e1489da36 36-37,101-108,110-134,372,478-487,493-507
+src/flow_studio/web/index.html
+  s_5f3cf1bfbef6cf::t_4c669d939fe984 7,150
+  s_5f3cf1bfbef6cf::t_e99a7ee9858216 11-19,21,29-33,37,44,58,70,140-144
+  s_5f3cf1bfbef6cf::t_f7c7aef0c7391b 145-146
+src/flow_studio/web/app.js
+  s_5f3cf1bfbef6cf::t_914b4350ec26aa 136,138-142,145-167,181-349,353-361,364-391,395-514,516-536
+  s_5f3cf1bfbef6cf::t_22e373ca977750 18,143-144,350-352,515
+  s_5f3cf1bfbef6cf::t_aa0d0852f7078b 17,53-58,60-61,65-72,76-135
+  s_5f3cf1bfbef6cf::t_d3b002266e0000 2223-2227,2652,2654-2667,2774-2784,2786-2787
+  s_5f3cf1bfbef6cf::t_8d4bf8e420269b 1575-1576,1584,1601-1602,1615-1636,1671
+  s_5f3cf1bfbef6cf::t_7b08cb6e9e83c9 362-363,392-394
+  s_5f3cf1bfbef6cf::t_4138b135d62497 1846,1848,1861-1864,1870-1875,1878-1879
+  s_5f3cf1bfbef6cf::t_13db3a3a844d10 137,537
+src/flow_studio/README.md
+  s_5f3cf1bfbef6cf::t_2167a39036738e 14-16,25-78,230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d81dee837e2668fa275469b1c650d1bc06f98ca8",
+  "prompts": {},
+  "sessions": {
+    "s_5f3cf1bfbef6cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0be1c-dfff-7900-9f60-ca366f73af13",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
