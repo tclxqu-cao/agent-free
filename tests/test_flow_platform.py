@@ -70,10 +70,10 @@ def agent_store(tmp_path):
 @pytest.fixture
 def client(config_dir, tmp_path):
     pytest.importorskip("fastapi")
-    from fastapi.testclient import TestClient
-
     from flow_studio.server import create_app
-    return TestClient(create_app(config_dir, tmp_path / "data"))
+    from conftest import make_governed_client
+
+    return make_governed_client(create_app(config_dir, tmp_path / "data"))
 
 
 # ---------------------------------------------------------------- 知识库

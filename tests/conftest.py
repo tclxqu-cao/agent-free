@@ -7,6 +7,23 @@ from job_agent.db import DB
 from job_agent.models import load_config, load_profile
 
 
+def make_governed_client(app, username: str = "owner"):
+    """Create a real initialized/login TestClient without an auth bypass."""
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/api/setup", json={
+        "username": username, "display_name": "Test Owner",
+        "password": "test-password-123",
+    })
+    assert response.status_code == 200, response.text
+    client.headers.update({
+        "X-CSRF-Token": response.json()["csrf_token"],
+        "X-Workspace-ID": "default",
+    })
+    return client
+
+
 @pytest.fixture
 def config_dir(tmp_path) -> Path:
     """把示例配置复制为 tmp 下的真实配置。"""

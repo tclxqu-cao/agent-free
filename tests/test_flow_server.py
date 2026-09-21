@@ -4,14 +4,13 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
-
 from flow_studio.server import create_app  # noqa: E402
+from conftest import make_governed_client  # noqa: E402
 
 
 @pytest.fixture
 def client(config_dir, tmp_path):
-    return TestClient(create_app(config_dir, tmp_path / "data"))
+    return make_governed_client(create_app(config_dir, tmp_path / "data"))
 
 
 def test_health_and_static(client):
@@ -63,7 +62,9 @@ def test_flow_crud_and_validation(client):
         "edges": [{"from": "start", "to": "end"}]})
     assert upd.status_code == 200 and upd.json()["name"] == "改名"
 
-    assert client.delete("/api/flows/mini").json() == {"deleted": "mini"}
+    deleted = client.delete("/api/flows/mini").json()
+    assert deleted["delete_draft"] == "mini"
+    assert deleted["_governance"]["action"] == "delete"
     assert client.get("/api/flows/mini").status_code == 404
 
 

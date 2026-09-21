@@ -398,11 +398,10 @@ def test_video_node_without_media_store_fails(tmp_path):
 # ---------------------------------------------------------------- 服务 API
 @pytest.fixture
 def client(config_dir, tmp_path):
-    from fastapi.testclient import TestClient
-
     from flow_studio.server import create_app
+    from conftest import make_governed_client
 
-    return TestClient(create_app(config_dir, tmp_path / "data"))
+    return make_governed_client(create_app(config_dir, tmp_path / "data"))
 
 
 def test_api_video_models(client):
