@@ -1,0 +1,23 @@
+src/flow_studio/governance.py
+  s_5f3cf1bfbef6cf::t_8670a9475a9fc1 1-95,98-101,103-256,258-385,387-392,400-664,666-668,670-690
+  s_5f3cf1bfbef6cf::t_187d85b59acacf 257,665,669
+  s_5f3cf1bfbef6cf::t_34386c4da2d86a 96-97,102
+  s_5f3cf1bfbef6cf::t_33507963a0e6cc 386
+  s_5f3cf1bfbef6cf::t_426771e8fbc52e 393-399
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9a862194565d263a05c713cc11d224252c8e37b4",
+  "prompts": {},
+  "sessions": {
+    "s_5f3cf1bfbef6cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0be1c-dfff-7900-9f60-ca366f73af13",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
