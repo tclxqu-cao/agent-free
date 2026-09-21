@@ -22,6 +22,20 @@ import httpx
 SNIPPET = 200          # 对比视图里答案摘要长度
 CASE_TIMEOUT = 300     # 单用例默认超时秒
 
+DEFAULT_EVAL_SUITE = {
+    "id": "smoke",
+    "name": "基础能力冒烟",
+    "description": "标准问题集：算术 / 指令遵循 / 记忆。可直接跑平台智能体并与 codex 等外部 agent 对比",
+    "cases": [
+        {"id": "calc", "question": "计算 12*12 等于多少，只回答数字。",
+         "expect": {"contains": ["144"]}, "note": "算术"},
+        {"id": "rewrite", "question": "把「我今天很想吃火锅」改写成更书面的表达。",
+         "expect": {"contains": ["火锅"]}, "note": "改写不得丢失关键信息"},
+        {"id": "remember", "question": "请记住：我最喜欢的颜色是蓝色。然后只用一个词回答我最喜欢的颜色是什么。",
+         "expect": {"contains": ["蓝"]}, "note": "指令遵循与上下文记忆"},
+    ],
+}
+
 
 # ---------------------------------------------------------------- 校验
 def run_checks(answer: str, expect: dict, llm_judge=None) -> list[dict]:
@@ -66,9 +80,10 @@ def run_checks(answer: str, expect: dict, llm_judge=None) -> list[dict]:
 class TargetRunner:
     """把三类目标统一成 execute(target, question) -> {answer, steps, error}。"""
 
-    def __init__(self, agent_rt=None, agent_store=None):
+    def __init__(self, agent_rt=None, agent_store=None, flow_runner=None):
         self.agent_rt = agent_rt
         self.agent_store = agent_store
+        self.flow_runner = flow_runner
 
     def execute(self, target: dict, question: str,
                 session_id: str | None = None) -> dict:
@@ -80,6 +95,8 @@ class TargetRunner:
                 return self._cli(target, question)
             if ttype == "http":
                 return self._http(target, question)
+            if ttype == "flow":
+                return self._flow(target, question)
             return {"answer": "", "steps": [], "error": f"未知目标类型：{ttype}"}
         except subprocess.TimeoutExpired:
             return {"answer": "", "steps": [],
@@ -130,6 +147,20 @@ class TargetRunner:
             msg = data["choices"][0].get("message") or {}
             return {"answer": msg.get("content") or "", "steps": [], "error": None}
         return {"answer": resp.text[:5000], "steps": [], "error": None}
+
+    def _flow(self, target: dict, question: str) -> dict:
+        if self.flow_runner is None:
+            return {"answer": "", "steps": [], "error": "流程运行时未初始化"}
+        flow_id = str(target.get("id") or "")
+        if not flow_id:
+            return {"answer": "", "steps": [], "error": "缺少流程 id"}
+        run = self.flow_runner(flow_id, question)
+        steps = [{"type": "flow_node", "name": n.get("node_id"),
+                  "ok": n.get("status") in ("success", "skipped"),
+                  "result": str(n.get("output") or n.get("error") or "")[:200]}
+                 for n in (run.get("nodes") or [])]
+        return {"answer": str(run.get("output") or ""), "steps": steps,
+                "error": run.get("error") if run.get("status") == "failed" else None}
 
 
 # ---------------------------------------------------------------- 存储
@@ -224,6 +255,18 @@ class EvalStore:
         p = self.runs_dir / f"{run_id}.json"
         return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
+    def latest_pass_rate(self, suite_id: str, target_key: str) -> float | None:
+        """Return the newest run's pass rate for one exact suite/target pair."""
+        for summary in self.list_runs(suite_id=suite_id, limit=100):
+            run = self.get_run(summary["run_id"])
+            if not run:
+                continue
+            rows = [r for r in run.get("results") or []
+                    if r.get("target_key") == target_key]
+            if rows:
+                return sum(1 for row in rows if row.get("pass")) / len(rows)
+        return None
+
 
 DEFAULT_EVAL_TARGETS = [
     {"key": "codex", "type": "cli", "name": "Codex CLI",
@@ -241,8 +284,8 @@ def run_suite(suite: dict, targets: list[dict], store: EvalStore,
     for t in targets:
         t = dict(t)
         t["key"] = str(t.get("key") or t.get("type") or "target")
-        if t["type"] == "platform" and t.get("id"):
-            t["key"] = f"platform:{t['id']}"
+        if t["type"] in ("platform", "flow") and t.get("id"):
+            t["key"] = f"{t['type']}:{t['id']}"
         t.setdefault("name", t["key"])
         norm_targets.append(t)
 

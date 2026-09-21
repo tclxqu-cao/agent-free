@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -40,8 +41,13 @@ class FlowStore:
     def save(self, graph: FlowGraph) -> FlowGraph:
         # graph_from_dict 已在调用侧校验；此处确保 id 合法可写
         path = self._path(graph.id)
-        path.write_text(json.dumps(graph_to_dict(graph), ensure_ascii=False, indent=2),
-                        encoding="utf-8")
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(graph_to_dict(graph), ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return graph
 
     def delete(self, flow_id: str) -> bool:

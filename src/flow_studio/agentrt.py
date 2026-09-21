@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -60,25 +61,16 @@ class AgentStore:
         return json.loads(p.read_text(encoding="utf-8"))
 
     def save(self, data: dict) -> dict:
-        agent_id = str(data.get("id") or "").strip()
-        if not agent_id:
-            raise ValueError("缺少智能体 id")
-        merged = {**data,
-                  "id": agent_id,
-                  "name": str(data.get("name") or agent_id),
-                  "description": str(data.get("description") or ""),
-                  "system": str(data.get("system") or "你是一个得力的智能体。"),
-                  "flow_id": str(data.get("flow_id") or ""),
-                  "kb_ids": [str(k) for k in (data.get("kb_ids") or [])],
-                  "skill_ids": [str(k) for k in (data.get("skill_ids") or [])],
-                  "tool_ids": [str(k) for k in (data.get("tool_ids") or [])],
-                  "mcp_servers": [str(k) for k in (data.get("mcp_servers") or [])],
-                  "memory": bool(data.get("memory")),
-                  "max_steps": max(1, min(30, int(data.get("max_steps") or 8))),
-                  "rag_top_k": max(1, min(20, int(data.get("rag_top_k") or RAG_TOP_K))),
-                  "updated_at": dt.datetime.now().isoformat(timespec="seconds")}
-        self._path(agent_id).write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        merged = normalize_agent(data)
+        agent_id = merged["id"]
+        path = self._path(agent_id)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return merged
 
     def delete(self, agent_id: str) -> bool:
@@ -101,6 +93,27 @@ def _meta(data: dict) -> dict:
             ("id", "name", "description", "flow_id", "kb_ids", "skill_ids",
              "tool_ids", "mcp_servers", "memory", "max_steps", "rag_top_k",
              "updated_at")}
+
+
+def normalize_agent(data: dict) -> dict:
+    """Normalize one Agent without writing it, for governed draft snapshots."""
+    agent_id = str(data.get("id") or "").strip()
+    if not agent_id:
+        raise ValueError("缺少智能体 id")
+    return {**data,
+            "id": agent_id,
+            "name": str(data.get("name") or agent_id),
+            "description": str(data.get("description") or ""),
+            "system": str(data.get("system") or "你是一个得力的智能体。"),
+            "flow_id": str(data.get("flow_id") or ""),
+            "kb_ids": [str(k) for k in (data.get("kb_ids") or [])],
+            "skill_ids": [str(k) for k in (data.get("skill_ids") or [])],
+            "tool_ids": [str(k) for k in (data.get("tool_ids") or [])],
+            "mcp_servers": [str(k) for k in (data.get("mcp_servers") or [])],
+            "memory": bool(data.get("memory")),
+            "max_steps": max(1, min(30, int(data.get("max_steps") or 8))),
+            "rag_top_k": max(1, min(20, int(data.get("rag_top_k") or RAG_TOP_K))),
+            "updated_at": dt.datetime.now().isoformat(timespec="seconds")}
 
 
 DEFAULT_AGENTS = [
