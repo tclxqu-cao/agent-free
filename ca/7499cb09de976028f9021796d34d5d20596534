@@ -1,0 +1,21 @@
+docs/superpowers/specs/2026-09-22-portfolio-skill-content-flow-design.md
+  s_3f2565b4f84945::t_fbaade4258ff1e 1-65,67-78,84-85,87-167,174-195,202-214,217-226,230-323,327-404
+  s_3f2565b4f84945::t_aa3c4c2794101f 66,86,215-216,227-229,324-326
+  s_3f2565b4f84945::t_6ec226aabb741f 79-83,168-173,196-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ca7499cb09de976028f9021796d34d5d20596534",
+  "prompts": {},
+  "sessions": {
+    "s_3f2565b4f84945": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c871-5134-7792-931a-669b4a91cd7c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
