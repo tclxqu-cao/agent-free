@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-09-23-flow-external-agent-protocol-design.md
+  s_0b7ae78449458f::t_3a4b26c5cbc05d 1-59,61-96,98-110,113-148,150-231
+  s_0b7ae78449458f::t_b9d9eaa934a357 60,97,111-112,149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c2d1938f4f558657482147f2e8cf32155cec5bfb",
+  "prompts": {},
+  "sessions": {
+    "s_0b7ae78449458f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c83e-853b-7bb0-9e86-8c1ea79b5d36",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
