@@ -1,0 +1,60 @@
+tests/test_flow_engine.py
+  s_0b7ae78449458f::t_456a34683ed383 231-265
+src/flow_studio/builtin_flows.py
+  s_0b7ae78449458f::t_8e76033415fef2 11-12,108-181,401
+src/flow_studio/engine.py
+  s_0b7ae78449458f::t_193229e6b15aff 76-77,91,274,290-295,360-395
+  s_0b7ae78449458f::t_638698787b61ae 396
+src/flow_studio/adapters.py
+  s_0b7ae78449458f::t_13d66d5ef50ec3 9,33-52,54-70,75-80,132-133,138-140,144-146,160-163,225-231,235,239,243
+  s_0b7ae78449458f::t_17b4a654810e11 91-94
+  s_0b7ae78449458f::t_8e76033415fef2 126-129
+src/flow_studio/homepage_flows.py
+  s_0b7ae78449458f::t_8e76033415fef2 6,54-55,66-82,84,95,98,103,105-107,112,116-125
+src/flow_studio/homepage.py
+  s_3f2565b4f84945::t_46b91f7c9e2597 16,63-66
+  s_0b7ae78449458f::t_c3e9985b47cd63 47,67-90,111-131,158,193-194,196-198,216-219
+tests/test_flow_builtin.py
+  s_0b7ae78449458f::t_0dce4522cd08bd 139-140,158-185
+  s_0b7ae78449458f::t_2c87349ffab94e 23,42-49,55-57,72-73,77,82,84-86,91-100,191-192
+  s_3f2565b4f84945::t_dc44654d6abfdd 186-187
+src/flow_studio/policy.py
+  s_0b7ae78449458f::t_193229e6b15aff 141,157-158,164-170
+tests/test_homepage_flow.py
+  s_0b7ae78449458f::t_3304405bc5de7b 4,30-31,52,54-55,62-63,65,78,80,82,114-117,139,179-181,198-200,271,277,280-283,287-288,291-299,312,320-321
+src/flow_studio/workspace.py
+  s_0b7ae78449458f::t_193229e6b15aff 79,94-101,109-113,124-125,128-129
+  s_0b7ae78449458f::t_63545d9e0fde70 85-87
+src/flow_studio/dependencies.py
+  s_0b7ae78449458f::t_193229e6b15aff 22,28-34
+src/flow_studio/graph.py
+  s_0b7ae78449458f::t_193229e6b15aff 46-54,359-360
+tests/test_flow_graph.py
+  s_0b7ae78449458f::t_456a34683ed383 44-52
+tests/test_flow_store.py
+  s_3f2565b4f84945::t_46b91f7c9e2597 21-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "211b7e9089af86d14e4484fcdba49cde5d4ec26c",
+  "prompts": {},
+  "sessions": {
+    "s_0b7ae78449458f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c83e-853b-7bb0-9e86-8c1ea79b5d36",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    },
+    "s_3f2565b4f84945": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c871-5134-7792-931a-669b4a91cd7c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
