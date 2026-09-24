@@ -11,7 +11,7 @@ uv sync --extra studio          # 安装 web 依赖（fastapi/uvicorn）
 uv run flow-studio              # 启动画布 http://127.0.0.1:8788 并自动打开浏览器
 ```
 
-首次打开会进入实例初始化页，需要创建首个 `owner`（密码至少 10 位）。后续所有
+首次打开会进入实例初始化页，需要创建首个 `owner`（密码不能为空）。后续所有
 API、媒体文件和 Web 操作都要求本地登录会话；写操作还必须携带当前会话的 CSRF token。
 
 画布里：
@@ -91,7 +91,7 @@ curl -b /tmp/flow-studio.cookies http://127.0.0.1:8788/api/me \
 
 ### 视频制作节点（AI 短片流水线）
 
-**剧情 → 分镜 → 角色设定图（多方位）→ 逐镜关键帧 → 图生视频 → ffmpeg 合成长片**，
+**剧情 → 分镜 → 角色设定图（可选）→ 逐镜关键帧 → 图生视频 → 配音 → 字幕成片**，
 比例（16:9 / 9:16 / 1:1 / 4:3）在分镜层一次设定、级联下游，合成时校验一致：
 
 | 类型 | 说明 |
@@ -100,21 +100,33 @@ curl -b /tmp/flow-studio.cookies http://127.0.0.1:8788/api/me \
 | 角色 👤 | 按方位清单（正面/左侧/右侧/背面…）各生成一张角色设定图入库 |
 | 关键帧 🖼 | 逐镜头生成首帧图（文生图），角色描述注入提示词保证一致性 |
 | 镜头视频 🎥 | 逐关键帧图生视频（通用「提交+轮询」两段式，兼容 OpenAI 风格中转） |
+| 配音 🔊 | 调用 team-agent `voice-service` 的 `/v1/tts`，按分镜 `narration` 逐镜生成 WAV；默认 Qwen3-TTS 0.6B 的 `Serena`、语速 `1.0` |
+| 成片 🎞 | 逐镜对齐视频和配音，视频不足时冻结尾帧、音频不足时补静音；生成并烧录 SRT，输出带旁白 MP4、连续 WAV 与独立 SRT |
 | 合成 🧩 | ffmpeg concat 按序合成长片（统一 H.264/yuv420p），校验比例一致 |
 | 素材 📦 | 引用素材库中的素材（图片/视频/音频），素材库面板可上传/预览/删除 |
 
-顶栏 **「模型」** 弹窗配置三类模型：分镜 LLM（默认继承 `config.llm`）、文生图、图生视频；
-**未配置或调用失败一律降级占位素材**（占位 PNG 纯 Python 生成、占位视频 ffmpeg 生成、
-无 ffmpeg 退 GIF），流水线始终可跑通；合成依赖 ffmpeg（`brew install ffmpeg`）。
+顶栏 **「模型」** 弹窗配置分镜 LLM（默认继承 `config.llm`）、文生图、图生视频和文本转语音。
+语音默认连接 `http://127.0.0.1:17863` 的 team-agent `voice-service`；本机回环地址可不填
+token，远程地址必须配置 Bearer token。图片或视频未配置时仍会生成占位素材（占位 PNG
+纯 Python 生成、占位视频 ffmpeg 生成、无 ffmpeg 退 GIF）；TTS 未启用、不可达或返回无效
+WAV 时，配音节点明确失败，不会把静音视频标记为完成。成片合成依赖 ffmpeg 与 libass
+字幕滤镜（`brew install ffmpeg`）。烧录中文字幕会按平台选择可覆盖中文的字体：macOS
+使用 Heiti SC，Linux 优先 Noto Sans CJK SC，Windows 优先 Microsoft YaHei；字体缺失时
+成片节点会明确失败并给出安装提示，避免静默产出方框字幕。
 
 内置流程 **「AI 短片 · 分镜流水线」**（video-demo）：无 LLM、无模型 key 即可端到端
 跑通全链路（占位图 + 占位片段 + 真实 ffmpeg 合成 8 秒成片），配好模型后同一流程直接产真片。
 生成产物（关键帧/片段/成片）在节点输出里直接内嵌预览，素材库面板统一管理。
 
+内置流程 **「项目介绍 · 配音成片」**（project-intro-video）接受 `project_name` 和
+`project_brief`，生成 8 镜、16:9、目标 72 秒（控制在 60–90 秒）的中文项目介绍。
+默认使用 Serena 逐镜配音，最后同时保存 MP4、WAV 和 SRT；项目没有配置 LLM 或视觉模型时
+仍可用确定性分镜和占位画面验证整条配音成片链路。
+
 画布为无限画布：视口裁剪（放大后只渲染可见节点）、连线增量更新、rAF 合帧、
 右下角小地图导航、＋/− 缩放按钮。
 
-内置四个流程：**应聘 Agent · 模拟数据日检**（job-hunt-demo）、**应聘 Agent · 每日流程**（job-hunt-daily）、**应聘助手 · 意图分流**（job-intent-demo）、**我的 Agent · 推理测试**（agent-brain-test，验证 AgentRoam 桥）+ **AI 短片 · 分镜流水线**（video-demo）。流程库按 id 增量补种，升级不覆盖你的修改。
+主要内置流程包括：**应聘 Agent · 模拟数据日检**（job-hunt-demo）、**应聘 Agent · 每日流程**（job-hunt-daily）、**应聘助手 · 意图分流**（job-intent-demo）、**我的 Agent · 推理测试**（agent-brain-test，验证 AgentRoam 桥）、**AI 短片 · 分镜流水线**（video-demo）和 **项目介绍 · 配音成片**（project-intro-video）。流程库按 id 增量补种，升级不覆盖你的修改。
 
 「我的 Agent」节点在 `config/config.yaml` 的 `agent_bridge` 段配置（默认 `http://127.0.0.1:3000`，无需 key——推理由你自己的 agent 完成）。
 
@@ -134,6 +146,11 @@ curl -b /tmp/flow-studio.cookies http://127.0.0.1:8788/api/me \
   流程里可再用「智能体」节点组装多智能体，嵌套最深 3 层防打穿）；
 - **能力配对**：知识库（自动 RAG + 检索片段数）/ 技能 / 工具 / MCP；
 - **记忆与执行**：长期记忆开关、工具循环最大步数。
+
+第三方智能体使用 Customer Agent 公共 Agent Loop。默认只把 System 提示词作为
+`instructions` 发送；勾选「将名称和描述加入 CA System 提示词」后，Flow Studio
+会在请求中同时加入名称与描述。该选项不会在 CA 创建或绑定固定智能体，
+`orchestration.agent_id` 仍可保持为空。
 
 画布 **✨ 智能体** 节点选择一个智能体作为步骤调用（自带其全部能力），输出
 `{text, steps, tool_calls, session_id}`，steps 保留 RAG 检索与每次工具调用轨迹。
