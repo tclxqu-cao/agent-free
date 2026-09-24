@@ -73,7 +73,8 @@ class FlowRunner:
     def __init__(self, registry: AgentRegistry | None = None,
                  llm_cfg: dict | None = None, bridge_cfg: dict | None = None,
                  media=None, vmodels=None, kb=None, memory=None, skills=None,
-                 mcp=None, tools=None, ai_agents=None, agent_rt=None, obs=None):
+                 mcp=None, tools=None, ai_agents=None, agent_rt=None, obs=None,
+                 subflow_invoker=None):
         self.registry = registry or AgentRegistry()
         self.llm_cfg = llm_cfg or {}
         self.bridge_cfg = bridge_cfg or {}
@@ -87,6 +88,7 @@ class FlowRunner:
         self.ai_agents = ai_agents  # AgentStore（智能体节点，可空）
         self.agent_rt = agent_rt    # AgentRuntime（智能体节点执行器，可空）
         self.obs = obs              # 可观测性 observer（None = 不上报）
+        self.subflow_invoker = subflow_invoker
 
     # ---------------------------------------------------------------- 主流程
     def run(self, graph: FlowGraph, inputs: dict | None = None, *,
@@ -269,6 +271,7 @@ class FlowRunner:
             handler = {
                 "start": self._run_start, "end": self._run_end,
                 "llm": self._run_llm, "agent": self._run_agent,
+                "subflow": self._run_subflow,
                 "condition": self._run_condition, "template": self._run_template,
                 "http": self._run_http, "intent": self._run_intent,
                 "brain": self._run_brain,
@@ -284,8 +287,12 @@ class FlowRunner:
                 nrun.ms = int((time.time() - t0) * 1000)
                 self._emit("node.log", message, nrun, level, trace)
 
-            with capture_node_logs(on_log):
-                nrun.output = handler(node, ns) or {}
+            self._active_node_run = nrun
+            try:
+                with capture_node_logs(on_log):
+                    nrun.output = handler(node, ns) or {}
+            finally:
+                self._active_node_run = None
             nrun.status = "success"
         except _SkipNode as e:
             nrun.status = "skipped"
@@ -349,6 +356,43 @@ class FlowRunner:
         if not isinstance(out, dict):
             out = {"result": out}
         return out
+
+    def _run_subflow(self, node: Node, ns: dict) -> dict:
+        if self.subflow_invoker is None:
+            raise ValueError("子流程运行时未初始化")
+        flow_id = render(str(node.params.get("flow_id") or ""), ns).strip()
+        if not flow_id:
+            raise ValueError("子流程 ID 为空")
+        inputs = render_deep(node.params.get("inputs") or {}, ns)
+        if not isinstance(inputs, dict):
+            raise ValueError("子流程 inputs 必须是对象")
+
+        def forward(event: dict) -> None:
+            event_type = str(event.get("type") or "")
+            if event_type not in {"node.started", "node.log", "node.finished",
+                                  "run.started", "run.finished"}:
+                return
+            label = str(event.get("node_label") or flow_id)
+            message = str(event.get("message") or event_type)
+            self._emit(
+                "node.log", f"{label}：{message}",
+                getattr(self, "_active_node_run", None),
+                str(event.get("level") or "info"), event.get("traceback"))
+
+        run = self.subflow_invoker(flow_id, inputs, event_sink=forward)
+        if not isinstance(run, dict):
+            raise RuntimeError("子流程返回值无效")
+        if run.get("status") != "success":
+            message = str(run.get("error") or "子流程执行失败")
+            if node.params.get("required", True):
+                raise RuntimeError(message)
+            raise _SkipNode(message)
+        nodes = {str(item.get("node_id") or ""): item.get("output") or {}
+                 for item in run.get("node_runs") or [] if item.get("node_id")}
+        return {"text": str(run.get("output") or ""),
+                "run_id": str(run.get("run_id") or ""),
+                "flow_id": str(run.get("flow_id") or flow_id),
+                "status": str(run.get("status") or ""), "nodes": nodes}
 
     def _run_brain(self, node: Node, ns: dict) -> dict:
         prompt = render(node.params.get("prompt") or "{{input.message}}", ns).strip()

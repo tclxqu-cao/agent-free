@@ -43,6 +43,15 @@ NODE_TYPES: dict[str, dict] = {
                  {"key": "optional", "widget": "bool", "label": "失败时降级跳过",
                   "default": False}],
     },
+    "subflow": {
+        "label": "子流程", "icon": "↳", "color": "#0284c7",
+        "desc": "调用同一 Workspace 内已配置的流程，并把子流程节点输出传给下游",
+        "form": [{"key": "flow_id", "widget": "text", "label": "流程 ID"},
+                 {"key": "inputs", "widget": "json", "label": "流程输入（值支持 {{模板}}）",
+                  "default": "{}"},
+                 {"key": "required", "widget": "bool", "label": "失败时中断流程",
+                  "default": True}],
+    },
     "brain": {
         "label": "我的 Agent", "icon": "🧠", "color": "#2563eb",
         "desc": "把话术交给自己的 agent（AgentRoam :3000）推理——带它的模型、工具、技能与记忆，回复作为节点输出",
@@ -347,6 +356,8 @@ def validate(g: FlowGraph) -> list[str]:
     for n in g.nodes:
         if n.type not in NODE_TYPES:
             errors.append(f"节点「{n.id}」类型未知：{n.type}")
+        if n.type == "subflow" and not str(n.params.get("flow_id") or "").strip():
+            errors.append(f"子流程节点「{n.id}」缺少流程 ID")
     starts = [n for n in g.nodes if n.type == "start"]
     if len(starts) != 1:
         errors.append(f"开始节点必须恰好 1 个，当前 {len(starts)}")

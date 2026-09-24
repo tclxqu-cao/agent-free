@@ -18,6 +18,8 @@ def test_seed_and_list(store):
     assert n == len(flows)
     assert store.seed_if_empty(flows) == 0  # 幂等
     assert [g.id for g in store.list()] == sorted(flow["id"] for flow in flows)
+    store.delete(flows[0]["id"])
+    assert store.seed_if_empty(flows) == 0  # 非空库不复活已删除的内置流程
 
 
 def test_seed_missing_only_adds(store):

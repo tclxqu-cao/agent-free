@@ -228,6 +228,41 @@ def test_agent_optional_degrades():
     assert run.node_run("a").status == "skipped"
 
 
+def test_subflow_exposes_structured_nodes_and_forwards_events():
+    seen = {}
+
+    def invoke(flow_id, inputs, event_sink=None):
+        seen.update(flow_id=flow_id, inputs=inputs)
+        event_sink({"type": "node.started", "level": "info",
+                    "node_label": "解析岗位城市", "message": "开始"})
+        return {
+            "run_id": "child-1", "flow_id": flow_id, "status": "success",
+            "output": "成都岗位完成",
+            "node_runs": [
+                {"node_id": "resolve_city", "output": {"city": "成都"}},
+                {"node_id": "match", "output": {"jobs": [{"title": "Java"}]}},
+            ],
+        }
+
+    graph = _g([
+        _node("start", "start"),
+        _node("jobs", "subflow", flow_id="job-hunt-real",
+              inputs={"message": "{{input.message}}"}, required=True),
+        _node("end", "end", output="{{jobs.nodes.resolve_city.city}}|{{jobs.text}}"),
+    ], [{"from": "start", "to": "jobs"}, {"from": "jobs", "to": "end"}])
+    events = []
+
+    run = FlowRunner(subflow_invoker=invoke).run(
+        graph, {"message": "job去搜索成都的"},
+        event_sink=lambda _snapshot, event: events.append(event))
+
+    assert run.status == "success" and run.output == "成都|成都岗位完成"
+    assert seen == {"flow_id": "job-hunt-real",
+                    "inputs": {"message": "job去搜索成都的"}}
+    assert any(event["type"] == "node.log" and "解析岗位城市" in event["message"]
+               for event in events)
+
+
 def test_cycle_terminates():
     g = _g([
         _node("start", "start"),

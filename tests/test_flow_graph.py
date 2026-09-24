@@ -41,6 +41,15 @@ def test_duplicate_and_unknown_type():
     assert any("类型未知" in e for e in errs)
 
 
+def test_subflow_requires_flow_id():
+    errs = validate(_graph(
+        [{"id": "s", "type": "start"},
+         {"id": "child", "type": "subflow", "params": {}},
+         {"id": "e", "type": "end"}],
+        [{"from": "s", "to": "child"}, {"from": "child", "to": "e"}]))
+    assert any("流程 ID" in error for error in errs)
+
+
 def test_dangling_edges():
     errs = validate(_graph(
         [{"id": "s", "type": "start"}, {"id": "e", "type": "end"}],

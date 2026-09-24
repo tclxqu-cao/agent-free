@@ -8,6 +8,8 @@ from __future__ import annotations
 from .graph import FlowGraph, Node, graph_to_dict
 from .homepage_flows import homepage_flows
 
+JOB_FLOW_REVISION = "job-city-v2"
+
 
 def _demo_flow() -> FlowGraph:
     """模拟数据日检：seed → 匹配 → 条件分支 → LLM 点评 → 汇总（无凭据无 LLM 可跑通）。"""
@@ -98,6 +100,80 @@ def _daily_flow() -> FlowGraph:
             {"from": "start", "to": "daily"},
             {"from": "daily", "to": "analyze"},
             {"from": "analyze", "to": "summary"},
+            {"from": "summary", "to": "end"},
+        ],
+    )
+
+
+def real_job_flow() -> FlowGraph:
+    """真实岗位流程：解析单次城市 → 抓取 → 匹配 → 可选分析。"""
+    return FlowGraph(
+        id="job-hunt-real",
+        name="应聘 Agent · 真实流程",
+        description=(
+            f"[{JOB_FLOW_REVISION}] 从输入话术或 city 参数解析城市，按本次城市抓取"
+            " boss/智联/猎聘/51job/lagou，再按个人规则匹配；analyze=false 可把"
+            "结构化结果交给上层智能体展示。"
+        ),
+        triggers=["跑真实应聘流程", "抓取真实岗位并分析", "真实岗位日报"],
+        nodes=[
+            Node(id="start", type="start", label="岗位请求", pos={"x": 40, "y": 200},
+                 params={"inputs": [
+                     {"key": "message", "required": False, "default": ""},
+                     {"key": "city", "required": False, "default": ""},
+                     {"key": "skip_scrape", "required": False, "default": False},
+                     {"key": "analyze", "required": False, "default": True},
+                 ]}),
+            Node(id="resolve_city", type="agent", label="解析岗位城市",
+                 pos={"x": 250, "y": 200}, params={
+                     "agent": "job_agent", "action": "resolve_city",
+                     "args": {"city": "{{input.city}}", "message": "{{input.message}}"},
+                 }),
+            Node(id="cond_scrape", type="condition", label="需要重新抓取？",
+                 pos={"x": 470, "y": 200}),
+            Node(id="scrape", type="agent", label="抓取真实岗位",
+                 pos={"x": 690, "y": 80}, params={
+                     "agent": "job_agent", "action": "scrape",
+                     "args": {"city": "{{resolve_city.city}}"}, "optional": True,
+                 }),
+            Node(id="match", type="agent", label="匹配城市岗位",
+                 pos={"x": 910, "y": 200}, params={
+                     "agent": "job_agent", "action": "match_today",
+                     "args": {"city": "{{resolve_city.city}}"},
+                 }),
+            Node(id="cond_brain", type="condition", label="需要大模型分析？",
+                 pos={"x": 1130, "y": 200}),
+            Node(id="brain", type="brain", label="大模型汇总分析",
+                 pos={"x": 1350, "y": 80}, params={
+                     "prompt": (
+                         "我是{{resolve_city.city}}的求职者，目标薪资 25K+。以下是今天"
+                         "抓取并按硬性规则筛选后的岗位清单：\n\n{{match.text}}\n\n"
+                         "请输出最值得投的 2-3 个岗位及理由、市场信号和一条行动建议。"
+                         "中文、分点、300 字以内。"
+                     ),
+                     "timeout": 300, "required": False,
+                 }),
+            Node(id="summary", type="template", label="汇总岗位结果",
+                 pos={"x": 1570, "y": 200}, params={"template": (
+                     "应聘 Agent · {{resolve_city.city}}真实岗位（{{vars.today}}）\n"
+                     "抓取入库 {{scrape.total_jobs}} 条；城市内在招 {{match.total}} 个，"
+                     "规则命中 {{match.passed_count}} 个：\n{{match.text}}\n"
+                     "{{brain.text}}"
+                 )}),
+            Node(id="end", type="end", label="输出岗位结果",
+                 pos={"x": 1790, "y": 200}, params={"output": "{{summary.text}}"}),
+        ],
+        edges=[
+            {"from": "start", "to": "resolve_city"},
+            {"from": "resolve_city", "to": "cond_scrape"},
+            {"from": "cond_scrape", "to": "scrape",
+             "branch": "input.skip_scrape != true"},
+            {"from": "cond_scrape", "to": "match", "branch": "else"},
+            {"from": "scrape", "to": "match"},
+            {"from": "match", "to": "cond_brain"},
+            {"from": "cond_brain", "to": "brain", "branch": "input.analyze == true"},
+            {"from": "cond_brain", "to": "summary", "branch": "else"},
+            {"from": "brain", "to": "summary"},
             {"from": "summary", "to": "end"},
         ],
     )
@@ -322,6 +398,7 @@ def _project_intro_video_flow() -> FlowGraph:
 
 def builtin_flows() -> list[dict]:
     return [graph_to_dict(_demo_flow()), graph_to_dict(_daily_flow()),
+            graph_to_dict(real_job_flow()),
             graph_to_dict(_intent_flow()), graph_to_dict(_brain_flow()),
             graph_to_dict(_video_flow()), graph_to_dict(_project_intro_video_flow()),
             *homepage_flows()]

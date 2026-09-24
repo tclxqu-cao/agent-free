@@ -76,21 +76,29 @@ class WorkspaceRuntime:
             kb=self.kb, mcp=self.mcp, obs=self.obs, flow_invoker=self._invoke_flow,
             bridge_cfg=self.bridge_cfg,
             credential_resolver=self.external_credentials.resolve)
+        self._flow_call_state = threading.local()
         self.evals = EvalStore(self.root / "evals")
         self.evals.seed_if_empty(DEFAULT_EVAL_SUITE)
         self.eval_runner = TargetRunner(
             agent_rt=self.agent_rt, agent_store=self.ai_agents,
             flow_runner=self._eval_flow)
-        self.flows.seed_missing(builtin_flows())
+        # A non-empty workspace is user-owned. Re-seeding missing built-ins on
+        # every restart would resurrect flows the user deliberately deleted.
+        self.flows.seed_if_empty(builtin_flows())
 
     def runner(self) -> FlowRunner:
         return FlowRunner(
             self.registry, self.llm_cfg, self.bridge_cfg, media=self.media,
             vmodels=self.vmodels, kb=self.kb, memory=self.memory, skills=self.skills,
             mcp=self.mcp, tools=self.tools, ai_agents=self.ai_agents,
-            agent_rt=self.agent_rt, obs=self.obs)
+            agent_rt=self.agent_rt, obs=self.obs,
+            subflow_invoker=self._invoke_flow)
 
-    def _invoke_flow(self, flow_id: str, inputs: dict) -> dict:
+    def _invoke_flow(self, flow_id: str, inputs: dict, event_sink=None) -> dict:
+        stack = list(getattr(self._flow_call_state, "stack", []))
+        if flow_id in stack:
+            chain = " -> ".join([*stack, flow_id])
+            raise ValueError(f"子流程循环引用：{chain}")
         graph = self.flows.get(flow_id)
         if graph is None:
             raise ValueError(f"绑定的流程不存在：{flow_id}")
@@ -98,7 +106,11 @@ class WorkspaceRuntime:
         declared = [item["key"] for item in start_inputs(graph) if item.get("key")]
         if declared and "message" not in declared and declared[0] not in merged:
             merged[declared[0]] = inputs.get("message", "")
-        return self.run_flow(graph, merged)
+        self._flow_call_state.stack = [*stack, flow_id]
+        try:
+            return self.run_flow(graph, merged, event_sink=event_sink)
+        finally:
+            self._flow_call_state.stack = stack
 
     def _eval_flow(self, flow_id: str, question: str) -> dict:
         graph = self.flows.get(flow_id)
@@ -109,9 +121,12 @@ class WorkspaceRuntime:
         return self.run_flow(graph, {key: question, "message": question})
 
     def run_flow(self, flow: FlowGraph, inputs: dict | None = None, *,
-                 run_id: str | None = None, metadata: dict | None = None) -> dict:
+                 run_id: str | None = None, metadata: dict | None = None,
+                 event_sink=None) -> dict:
         def record(snapshot, event):
             self.runs.record({**snapshot, **(metadata or {})}, event)
+            if event_sink is not None:
+                event_sink(event)
 
         result = self.runner().run(flow, inputs, run_id=run_id, event_sink=record)
         data = result.to_dict()

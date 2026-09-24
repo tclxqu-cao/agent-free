@@ -138,6 +138,7 @@ class PolicyEngine:
         allowed_types = set(policy["allowed_flow_node_types"])
         allowed_hosts = {host.lower() for host in policy["allowed_http_hosts"]}
         known_agents = context.get("agent_ids")
+        known_flows = context.get("flow_ids")
         for index, node in enumerate(snapshot.get("nodes") or []):
             ntype = str(node.get("type") or "")
             path = f"nodes[{index}]"
@@ -153,9 +154,17 @@ class PolicyEngine:
                         "http_host_denied", f"HTTP 主机 {host or rendered} 不在允许清单中",
                         f"{path}.params.url"))
             if ntype == "ai_agent" and known_agents is not None:
-                agent_id = str(params.get("agent_id") or params.get("id") or "")
+                agent_id = str(params.get("ai_agent_id") or params.get("agent_id")
+                               or params.get("id") or "")
                 if agent_id and agent_id not in set(known_agents):
                     out.append(PolicyViolation(
                         "cross_workspace_reference",
                         f"引用的智能体 {agent_id} 不属于当前 Workspace",
                         f"{path}.params.agent_id"))
+            if ntype == "subflow" and known_flows is not None:
+                flow_id = str(params.get("flow_id") or "")
+                if flow_id and flow_id not in set(known_flows):
+                    out.append(PolicyViolation(
+                        "cross_workspace_reference",
+                        f"引用的流程 {flow_id} 不属于当前 Workspace",
+                        f"{path}.params.flow_id"))

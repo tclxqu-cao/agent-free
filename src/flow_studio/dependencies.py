@@ -19,12 +19,19 @@ def referenced_resources(resource_type: str, snapshot: dict | None) -> set[Resou
         flow_id = str(snapshot.get("flow_id") or "").strip()
         return {resource_key("flow", flow_id)} if flow_id else set()
     if resource_type == "flow":
-        return {
+        references = {
             resource_key("agent", agent_id)
             for node in snapshot.get("nodes") or []
             if node.get("type") == "ai_agent"
             and (agent_id := str((node.get("params") or {}).get("ai_agent_id") or "").strip())
         }
+        references.update({
+            resource_key("flow", flow_id)
+            for node in snapshot.get("nodes") or []
+            if node.get("type") == "subflow"
+            and (flow_id := str((node.get("params") or {}).get("flow_id") or "").strip())
+        })
+        return references
     return set()
 
 

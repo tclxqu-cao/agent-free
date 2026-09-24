@@ -6,6 +6,7 @@ job_agent 不可导入（依赖缺失）时不注册，编排画布其余功能�
 
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 
@@ -29,11 +30,53 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
 
     config_dir = Path(config_dir)
 
+    def _supported_cities(config: dict) -> list[str]:
+        from job_agent.sites import REGISTRY
+
+        enabled = config.get("sites") or list(REGISTRY)
+        city_sets = [set(REGISTRY[site_id].city_codes)
+                     for site_id in enabled if site_id in REGISTRY]
+        return sorted(set.intersection(*city_sets) if city_sets else set())
+
+    def _resolve_city(args: dict, config: dict) -> str:
+        supported = _supported_cities(config)
+        explicit = str(args.get("city") or "").strip()
+        source = explicit or str(args.get("message") or "").strip()
+        matches = [city for city in supported if city in source]
+        if matches:
+            return max(matches, key=len)
+        if explicit:
+            raise ValueError(
+                f"暂不支持城市「{explicit}」，可选：{'、'.join(supported)}")
+        return str((config.get("home") or {}).get("city") or "").strip()
+
     def _ctx(args: dict):
-        config = load_config(config_dir)
+        config = copy.deepcopy(load_config(config_dir))
+        city = _resolve_city(args, config)
+        if city:
+            from job_agent.distance import DISTRICTS
+
+            home = config.setdefault("home", {})
+            original_city = str(home.get("city") or "").strip()
+            home["city"] = city
+            if city != original_city:
+                center = (DISTRICTS.get(city) or {}).get("__city__")
+                home["district"] = ""
+                if center:
+                    home["lat"], home["lng"] = center
+                else:
+                    home.pop("lat", None)
+                    home.pop("lng", None)
+            config.setdefault("rules", {})["cities"] = [city]
         profile = load_profile(config_dir)
         db = DB(data_dir(config, config_dir) / "job_agent.db")
         return config, profile, db
+
+    def resolve_city(args: dict) -> dict:
+        config = load_config(config_dir)
+        city = _resolve_city(args, config)
+        return {"city": city, "supported_cities": _supported_cities(config),
+                "text": f"本次岗位城市：{city}"}
 
     def _job_view(m) -> dict:
         return {
@@ -45,7 +88,10 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
             "urgency": m.job.urgency, "views": m.job.views, "greets": m.job.greets,
             "company_size": m.job.company_size, "score": round(m.score, 1),
             "passed": m.passed, "reasons": m.reasons[:5],
-            "skills": m.job.skills[:10], "url": m.job.url,
+            "skills": m.job.skills[:10],
+            "responsibilities": m.job.responsibilities[:8],
+            "requirements": m.job.requirements_extra[:8],
+            "url": m.job.url,
         }
 
     def _jobs_text(matches: list) -> str:
@@ -77,18 +123,27 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
 
         day = args.get("day") or dt.date.today().isoformat()
         jobs = today_jobs(db, day)
+        city = str((config.get("home") or {}).get("city") or "")
+        if city:
+            jobs = [job for job in jobs if job.city and
+                    (city in job.city or job.city in city)]
         matches = filter_and_score(jobs, config.get("rules") or {}, profile)
         passed = [m for m in matches if m.passed]
-        return {"day": day, "total": len(jobs), "passed_count": len(passed),
+        return {"day": day, "city": city, "total": len(jobs),
+                "passed_count": len(passed),
                 "jobs": [_job_view(m) for m in passed[:20]],
                 "text": _jobs_text(passed) or "（无命中岗位）"}
 
     def daily(args: dict) -> dict:
-        summary = run_daily(config_dir, skip_scrape=bool(args.get("skip_scrape")))
+        config, _, db = _ctx(args)
+        summary = run_daily(config_dir, skip_scrape=bool(args.get("skip_scrape")),
+                            config=config, db=db)
         errors = summary.get("errors") or []
         err_text = "".join(f"\n  ⚠️ {e.get('site')}「{e.get('keyword')}」：{e.get('error')}"
                            for e in errors)
-        return {"date": summary["date"], "jobs": summary["jobs"],
+        return {"date": summary["date"],
+                "city": str((config.get("home") or {}).get("city") or ""),
+                "jobs": summary["jobs"],
                 "passed": summary["passed"], "report": summary["report"],
                 "llm_used": summary["llm_used"], "errors": errors,
                 "text": f"{summary['date']} 在招 {summary['jobs']} 个、命中 "
@@ -102,7 +157,10 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
 
         stats = scrape_all(config, config_dir, db,
                            sites=[args["site"]] if args.get("site") else None)
-        return {"total_jobs": stats.get("total_jobs"), "errors": stats.get("errors", [])}
+        city = str((config.get("home") or {}).get("city") or "")
+        return {"city": city, "total_jobs": stats.get("total_jobs"),
+                "errors": stats.get("errors", []),
+                "text": f"{city} 抓取入库 {stats.get('total_jobs') or 0} 条"}
 
     def analyze(args: dict) -> dict:
         config, _, db = _ctx(args)
@@ -164,18 +222,25 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
                         "description": "生成天数，默认 10"},
                        {"key": "reset", "type": "bool", "required": False,
                         "description": "是否清库重建，默认 true"}])
+    city_param = {"key": "city", "type": "string", "required": False,
+                  "description": "本次查询城市；不传则使用配置默认城市"}
+    registry.register("job_agent", "resolve_city", resolve_city,
+                      "从城市参数或自然语言中解析本次岗位城市",
+                      [city_param,
+                       {"key": "message", "type": "string", "required": False,
+                        "description": "可包含城市名的自然语言"}])
     registry.register("job_agent", "match_today", match_today,
                       "按个人规则匹配今日岗位（硬过滤 + 0-100 评分），返回列表",
                       [{"key": "day", "type": "string", "required": False,
-                        "description": "YYYY-MM-DD，默认今天"}])
+                        "description": "YYYY-MM-DD，默认今天"}, city_param])
     registry.register("job_agent", "daily", daily,
                       "每日全流程：抓取→匹配→建议→日报（skip_scrape 可只看库内数据）",
                       [{"key": "skip_scrape", "type": "bool", "required": False,
-                        "description": "跳过抓取，默认 false"}])
+                        "description": "跳过抓取，默认 false"}, city_param])
     registry.register("job_agent", "scrape", scrape,
                       "对启用站点抓取一次并入库（需登录态）",
                       [{"key": "site", "type": "string", "required": False,
-                        "description": "只抓该站点，默认全部启用站点"}])
+                        "description": "只抓该站点，默认全部启用站点"}, city_param])
     registry.register("job_agent", "analyze", analyze,
                       "岗位数量 / 薪资 / 技能热度趋势与热度增量",
                       [{"key": "days", "type": "number", "required": False,

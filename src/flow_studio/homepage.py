@@ -13,6 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .agentrt import AgentRuntime, AgentStore, DEFAULT_AGENTS
+from .builtin_flows import JOB_FLOW_REVISION, builtin_flows, real_job_flow
 from .engine import FlowRunner
 from .graph import graph_from_dict, graph_to_dict
 from .homepage_artifacts import HomepageArtifactStore, validate_artifact
@@ -43,6 +44,7 @@ class HomepageService:
         self._remove_deprecated_agents(self.legacy_agents)
         self.legacy_agent_rt = AgentRuntime(
             self.llm_cfg, ToolRegistry(), bridge_cfg=studio.config.get("agent_bridge") or {})
+        self.legacy_agent_rt.flow_invoker = self._invoke_legacy_flow
         self.artifacts = HomepageArtifactStore(studio.data_root / "homepage_artifacts")
         self._ensure_legacy_flow()
         if self.studio.governance.is_initialized():
@@ -58,10 +60,34 @@ class HomepageService:
         return graph_from_dict(homepage_flows()[0])
 
     def _ensure_legacy_flow(self):
-        desired = self._desired_graph()
-        current = self.legacy_flows.get(MAIN_FLOW_ID)
-        if current is None or HOMEPAGE_FLOW_REVISION not in current.description:
-            self.legacy_flows.save(desired)
+        # Seed a brand-new installation before the targeted homepage/job
+        # migrations make the store non-empty. Existing stores remain
+        # user-owned, so deleted built-ins are not restored on restart.
+        self.legacy_flows.seed_if_empty(builtin_flows())
+        for desired, revision in ((self._desired_graph(), HOMEPAGE_FLOW_REVISION),
+                                  (real_job_flow(), JOB_FLOW_REVISION)):
+            current = self.legacy_flows.get(desired.id)
+            if current is None or revision not in current.description:
+                self.legacy_flows.save(desired)
+
+    def _invoke_legacy_flow(self, flow_id, inputs, event_sink=None):
+        graph = self.legacy_flows.get(flow_id)
+        if graph is None:
+            raise ValueError(f"绑定的流程不存在：{flow_id}")
+
+        def record(snapshot, event):
+            self.legacy_runs.record(snapshot, event)
+            if event_sink is not None:
+                event_sink(event)
+
+        result = FlowRunner(
+            self.studio.registry, self.llm_cfg,
+            self.studio.config.get("agent_bridge") or {},
+            ai_agents=self.legacy_agents, agent_rt=self.legacy_agent_rt,
+            subflow_invoker=self._invoke_legacy_flow,
+        ).run(graph, inputs, event_sink=record).to_dict()
+        self.legacy_runs.append(result)
+        return result
 
     def _ensure_governed_flow(self, runtime):
         desired = self._desired_graph()
@@ -80,6 +106,27 @@ class HomepageService:
             "Migrate homepage to one orchestrating Agent")
         self.studio.governance.set_release(
             version["version_id"], actor, "Migrate homepage to one orchestrating Agent")
+        runtime.flows.save(desired)
+
+    def _ensure_governed_job_flow(self, runtime):
+        desired = real_job_flow()
+        release = self.studio.governance.get_release(
+            "default", "flow", desired.id)
+        snapshot = (release or {}).get("snapshot") or {}
+        if JOB_FLOW_REVISION in str(snapshot.get("description") or ""):
+            return
+        actor = self.studio.governance.workspace_creator("default")
+        version = self.studio.governance.save_version(
+            "default", "flow", desired.id, graph_to_dict(desired), "upsert", actor)
+        version = self.studio.governance.set_version_status(
+            version["version_id"], ("draft",), "pending", actor,
+            "Add per-run city support to the real job workflow")
+        version = self.studio.governance.set_version_status(
+            version["version_id"], ("pending",), "approved", actor,
+            "Add per-run city support to the real job workflow")
+        self.studio.governance.set_release(
+            version["version_id"], actor,
+            "Add per-run city support to the real job workflow")
         runtime.flows.save(desired)
 
     @staticmethod
@@ -108,6 +155,7 @@ class HomepageService:
 
     def _ensure_governed_resources(self, runtime):
         self._remove_deprecated_governed_agents(runtime)
+        self._ensure_governed_job_flow(runtime)
         self._ensure_governed_flow(runtime)
 
     def _resources(self):
@@ -142,8 +190,12 @@ class HomepageService:
             and selection.get("memory_enabled") is False
         )
         for node in graph.nodes:
-            if node.type not in {"start", "end", "condition", "ai_agent"}:
+            if node.type not in {"start", "end", "condition", "template",
+                                  "subflow", "ai_agent"}:
                 raise ValueError("主页流程包含未授权节点")
+            if (node.type == "subflow"
+                    and str(node.params.get("flow_id") or "") != "job-hunt-real"):
+                raise ValueError("主页流程包含未授权的子流程")
             if node.type == "ai_agent":
                 skill = str(node.params.get("skill_id") or "")
                 agent_id = node.params.get("ai_agent_id")
@@ -161,7 +213,10 @@ class HomepageService:
                       "job_snapshot": self._job_snapshot(),
                       "session_id": f"homepage-{session_id}" if session_id else ""}
         result = FlowRunner(
-            ai_agents=agents, agent_rt=agent_rt).run(
+            self.studio.registry, self.llm_cfg,
+            self.studio.config.get("agent_bridge") or {},
+            ai_agents=agents, agent_rt=agent_rt,
+            subflow_invoker=agent_rt.flow_invoker).run(
                 graph, flow_input, event_sink=runs.record).to_dict()
         runs.append(result)
         if result["status"] != "success":

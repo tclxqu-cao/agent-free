@@ -20,7 +20,7 @@ def _demo_runner(config_dir: Path) -> tuple[FlowRunner, object]:
 def test_builtin_flows_shape():
     flows = builtin_flows()
     by_id = {f["id"]: f for f in flows}
-    assert {"job-hunt-demo", "job-hunt-daily", "job-intent-demo",
+    assert {"job-hunt-demo", "job-hunt-daily", "job-hunt-real", "job-intent-demo",
             "agent-brain-test", "video-demo", "project-intro-video",
             "homepage-main"} == set(by_id)
     demo = graph_from_dict(by_id["job-hunt-demo"])
@@ -39,12 +39,22 @@ def test_builtin_flows_shape():
                        if e["from"] == router.id]
     assert set(intent_branches) == {"find_jobs", "trend_analysis", "else"}
 
-    # Homepage command translation and execution use one visible four-node graph.
+    real = graph_from_dict(by_id["job-hunt-real"])
+    real_nodes = {node.id: node for node in real.nodes}
+    assert real_nodes["resolve_city"].params["action"] == "resolve_city"
+    assert real_nodes["scrape"].params["args"]["city"] == "{{resolve_city.city}}"
+    assert real_nodes["match"].params["args"]["city"] == "{{resolve_city.city}}"
+    assert "{{resolve_city.city}}" in real_nodes["brain"].params["prompt"]
+
+    # Homepage routes job requests through the real job flow before one renderer Agent.
     homepage = graph_from_dict(by_id["homepage-main"])
     nodes = {node.id: node for node in homepage.nodes}
     assert homepage.name == "个人主页 · 主流程"
     assert {node_id: nodes[node_id].label for node_id in nodes} == {
         "start": "主页访客输入",
+        "request_route": "岗位意图路由",
+        "job_workflow": "真实岗位流程",
+        "job_prompt": "岗位展示任务",
         "prompt_decision": "任务提示词判断",
         "homepage_agent": "小熊",
         "end": "主页展示结果",
@@ -59,21 +69,35 @@ def test_builtin_flows_shape():
     assert "{{input.message}}" in decision.params["default_output"]
     assert any(item["key"] == "session_id"
                for item in nodes["start"].params["inputs"])
+    assert nodes["job_workflow"].type == "subflow"
+    assert nodes["job_workflow"].params["flow_id"] == "job-hunt-real"
     assert nodes["homepage_agent"].params == {
         "ai_agent_id": "homepage-agent",
         "skill_id": "homepage-orchestrator",
-        "message": "{{prompt_decision.text}}",
+        "message": "{{prompt_decision.text}}{{job_prompt.text}}",
         "session_id": "{{input.session_id}}",
         "context": {
             "surface": "public-homepage",
             "originalMessage": "{{input.message}}",
-            "promptRule": "{{prompt_decision.rule}}",
+            "promptRule": "{{prompt_decision.rule}}{{job_prompt.text}}",
             "jobSnapshot": "{{input.job_snapshot}}",
+            "jobCity": "{{job_workflow.nodes.resolve_city.city}}",
+            "jobResult": "{{job_workflow.nodes.match}}",
+            "jobRunId": "{{job_workflow.run_id}}",
         },
         "required": True,
     }
     assert homepage.edges == [
-        {"from": "start", "to": "prompt_decision"},
+        {"from": "start", "to": "request_route"},
+        {"from": "request_route", "to": "job_workflow", "branch": (
+            "input.message == '/jobs' or input.message == '/job' or "
+            "'岗位' in input.message or '招聘' in input.message or "
+            "'找工作' in input.message or '应聘' in input.message or "
+            "'job' in input.message or 'Job' in input.message or 'JOB' in input.message"
+        )},
+        {"from": "request_route", "to": "prompt_decision", "branch": "else"},
+        {"from": "job_workflow", "to": "job_prompt"},
+        {"from": "job_prompt", "to": "homepage_agent"},
         {"from": "prompt_decision", "to": "homepage_agent"},
         {"from": "homepage_agent", "to": "end"},
     ]
@@ -112,7 +136,8 @@ def test_registry_catalog(config_dir):
     catalog = reg.agents()
     job = next(a for a in catalog if a["agent"] == "job_agent")
     actions = {a["action"] for a in job["actions"]}
-    assert {"demo_seed", "match_today", "daily", "scrape", "analyze", "report",
+    assert {"demo_seed", "resolve_city", "match_today", "daily", "scrape",
+            "analyze", "report",
             "login_status"} <= actions
 
 
@@ -130,10 +155,41 @@ def test_match_today_action_direct(config_dir):
     assert isinstance(match["jobs"], list)
 
 
+def test_job_actions_apply_request_city_without_mutating_config(config_dir, monkeypatch):
+    from flow_studio.adapters import register_job_agent
+    from flow_studio.registry import AgentRegistry
+    from job_agent.distance import DISTRICTS
+    from job_agent.models import load_config
+
+    seen = {}
+
+    def fake_scrape(config, _config_dir, _db, sites=None):
+        seen.update(config=config, sites=sites)
+        return {"total_jobs": 3, "errors": []}
+
+    monkeypatch.setattr("job_agent.sites.scrape_all", fake_scrape)
+    reg = AgentRegistry()
+    register_job_agent(reg, config_dir)
+
+    resolved = reg.get("job_agent", "resolve_city").fn({
+        "message": "job去搜索成都的"})
+    scraped = reg.get("job_agent", "scrape").fn({"city": resolved["city"]})
+
+    assert resolved["city"] == "成都"
+    assert scraped["city"] == "成都"
+    assert seen["config"]["home"] == {
+        "city": "成都", "district": "", "lat": DISTRICTS["成都"]["__city__"][0],
+        "lng": DISTRICTS["成都"]["__city__"][1],
+    }
+    assert seen["config"]["rules"]["cities"] == ["成都"]
+    assert load_config(config_dir)["home"]["city"] == "苏州"
+
+
 def test_intent_flow_routes_three_branches(config_dir):
     """意图分流流程端到端：三条支路各跑一遍（无 LLM → 关键词降级）。"""
     runner, _ = _demo_runner(config_dir)
-    flow = graph_from_dict(builtin_flows()[2])
+    flow = graph_from_dict(next(item for item in builtin_flows()
+                               if item["id"] == "job-intent-demo"))
     assert flow.id == "job-intent-demo"
 
     run_jobs = runner.run(flow, {"message": "帮我看看今天的岗位"})
