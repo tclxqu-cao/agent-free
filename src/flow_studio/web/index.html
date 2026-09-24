@@ -4,7 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Flow Studio · 智能体平台</title>
-<link rel="stylesheet" href="style.css?v=16">
+<script>
+try {
+  document.documentElement.dataset.theme = localStorage.getItem("flow-studio-theme") === "light"
+    ? "light" : "dark";
+} catch (_) { document.documentElement.dataset.theme = "dark"; }
+</script>
+<link rel="stylesheet" href="style.css?v=22">
 </head>
 <body>
 
@@ -25,16 +31,20 @@
     <button id="nav-flows">工作流画布</button>
   </nav>
   <div class="spacer"></div>
-  <button id="btn-res" title="知识库 / 技能 / MCP / 记忆 / 评测">资源库</button>
-  <button id="btn-gov" title="版本 / 审批 / 成员 / 策略 / 审计">治理</button>
-  <select id="workspace-select" title="当前 Workspace"></select>
-  <span id="user-role" class="role-badge"></span>
-  <span id="user-name"></span>
-  <button id="btn-logout" class="icon-btn" title="退出登录">↪</button>
+  <div class="nav-actions">
+    <button id="btn-theme" class="icon-btn" title="切换浅色主题" aria-label="切换浅色主题">☀</button>
+    <button id="btn-res" title="知识库 / 技能 / MCP / 记忆 / 评测">资源库</button>
+    <button id="btn-gov" title="版本 / 审批 / 成员 / 策略 / 审计">治理</button>
+    <select id="workspace-select" title="当前 Workspace"></select>
+    <span id="user-role" class="role-badge"></span>
+    <span id="user-name"></span>
+    <button id="btn-logout" class="icon-btn" title="退出登录" aria-label="退出登录">↪</button>
+  </div>
 </header>
 
 <!-- 工作流画布视图的工具栏（仅在画布视图显示） -->
 <header id="topbar" class="view-hidden app-authenticated">
+  <button id="btn-flow-back" title="返回工作流列表">← 工作流</button>
   <button id="btn-palette" class="mobile-only" title="节点面板">＋节点</button>
   <select id="flow-select" title="选择流程"></select>
   <button id="btn-new" title="新建空白流程">新建</button>
@@ -43,6 +53,7 @@
   <button id="btn-save" class="primary" title="保存流程（⌘S）">保存</button>
   <span id="flow-governance"></span>
   <button id="btn-run" class="primary" title="运行当前流程">▶ 运行</button>
+  <button id="btn-runs" title="查看流程运行记录">运行记录</button>
   <span id="run-status"></span>
   <button id="btn-models" title="配置分镜 LLM / 文生图 / 图生视频模型">模型</button>
   <button id="btn-media" title="素材库：上传 / 预览 / 删除素材">素材库</button>
@@ -66,13 +77,25 @@
   <div id="agents-grid"></div>
 </section>
 
+<!-- 工作流列表（进入画布前先选择要编辑的流程） -->
+<section id="flows-view" class="view-hidden app-authenticated">
+  <div id="flows-hero">
+    <div>
+      <h1>工作流</h1>
+      <p>查看已有编排，选择一个流程进入画布编辑。</p>
+    </div>
+    <button id="flows-new" class="primary">＋ 新增工作流</button>
+  </div>
+  <div id="flows-grid"></div>
+</section>
+
 <!-- 工作流画布视图 -->
 <div id="main" class="view-hidden app-authenticated">
   <aside id="palette">
     <button id="palette-close" class="drawer-close mobile-only" title="收起">×</button>
     <h3>节点</h3>
     <div id="palette-list"></div>
-    <div class="palette-note">知识库 / 记忆 / 技能是<b>智能体的能力</b>，在「资源库」中配对；画布用「智能体」节点调用它。<br>点击节点类型添加到画布；拖端口连线；条件/意图连线双击改分支。</div>
+    <div class="palette-note">知识库 / 记忆 / 技能 / 工具 / MCP 都是<b>智能体的能力</b>，在智能体中配置；画布只用「智能体」节点调用它。<br>点击节点类型添加到画布；拖端口连线；条件/意图连线双击改分支。</div>
   </aside>
 
   <div id="canvas-wrap">
@@ -92,9 +115,22 @@
       <div class="rp-head">
         <span id="rp-title">运行结果</span>
         <span id="rp-status"></span>
+        <button id="rp-snapshot">执行图快照</button>
         <button id="rp-close">收起</button>
       </div>
-      <div id="rp-list"></div>
+      <div class="rp-tools">
+        <div class="rp-tabs" role="tablist" aria-label="运行详情">
+          <button data-run-tab="nodes" role="tab" aria-selected="true">节点</button>
+          <button data-run-tab="logs" role="tab" aria-selected="false">日志 <span id="rp-log-count">0</span></button>
+          <button data-run-tab="output" role="tab" aria-selected="false">输出</button>
+        </div>
+        <span id="rp-connection" role="status"></span>
+        <label class="rp-follow"><input type="checkbox" id="rp-follow" checked>自动滚动</label>
+      </div>
+      <div id="rp-version-note"></div>
+      <div id="rp-list" class="rp-content" role="tabpanel"></div>
+      <div id="rp-logs" class="rp-content" role="log" aria-label="节点运行日志" hidden></div>
+      <div id="rp-output" class="rp-content" role="tabpanel" hidden></div>
     </div>
   </div>
 
@@ -147,6 +183,6 @@
 <div id="modal-mask"><div class="modal" id="modal"></div></div>
 <div id="toast"></div>
 
-<script src="app.js?v=17"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>

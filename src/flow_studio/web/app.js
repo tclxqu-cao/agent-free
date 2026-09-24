@@ -21,6 +21,9 @@ const state = {
   sel: null,              // {kind:'node'|'edge', id}
   view: { x: 40, y: 30, s: 1 },
   lastRun: null,          // 最近一次运行结果
+  runSubmitting: false,
+  runMonitor: { generation: 0, timer: null, controller: null, seq: 0, retries: 0,
+    events: [], onComplete: null, active: false },
   dirty: false,
   mediaAssets: [],        // 素材库
   mediaKind: "",          // 素材过滤
@@ -35,7 +38,7 @@ const state = {
   toolList: [],           // 内置工具
   memScope: "",           // 记忆面板当前作用域
   evalView: null,         // null=列表 | {mode:'run', run_id} | {mode:'compare'}
-  viewMode: "agents",     // agents（默认主页）/ flows（画布）
+  viewMode: "agents",     // agents / flows-list / flows-editor
   chatTarget: null,       // 对话中的智能体 id
   chatSessions: {},       // agent_id → session_id
   chatLog: {},            // agent_id → [{role, text, steps?, error?}]
@@ -47,6 +50,27 @@ const nodeEls = new Map();      // 节点 id → DOM（视口内才建）
 const edgeEls = new Map();      // 边 key → {g, path, text}
 const heightCache = new Map();  // 节点 id → 高度（避免拖动时读 DOM）
 const svgNS = "http://www.w3.org/2000/svg";
+
+/* ================= 主题 ================= */
+const THEME_STORAGE_KEY = "flow-studio-theme";
+function applyTheme(theme) {
+  const value = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = value;
+  const button = $("#btn-theme");
+  if (button) {
+    const nextLabel = value === "light" ? "切换深色主题" : "切换浅色主题";
+    button.textContent = value === "light" ? "☾" : "☀";
+    button.title = nextLabel;
+    button.setAttribute("aria-label", nextLabel);
+    button.setAttribute("aria-pressed", String(value === "light"));
+  }
+}
+applyTheme(document.documentElement.dataset.theme);
+$("#btn-theme").onclick = () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch { /* 主题仍在当前页面生效 */ }
+};
 
 /* ================= API ================= */
 async function api(path, opts = {}) {
@@ -87,7 +111,7 @@ function authForm(mode) {
   $("#auth-form").innerHTML = `
     ${setup ? '<label>显示名称<input id="auth-display" autocomplete="name" required></label>' : ""}
     <label>用户名<input id="auth-user" autocomplete="username" pattern="[A-Za-z0-9_-]+" required></label>
-    <label>密码<input id="auth-pass" type="password" minlength="10" autocomplete="${setup ? "new-password" : "current-password"}" required></label>
+    <label>密码<input id="auth-pass" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required></label>
     <div id="auth-error" class="form-error"></div>
     <button class="primary" type="submit">${setup ? "创建 owner" : "登录"}</button>`;
   $("#auth-form").onsubmit = async e => {
@@ -111,7 +135,10 @@ function authForm(mode) {
   setTimeout(() => $("#auth-user")?.focus(), 0);
 }
 function renderSetup() { authForm("setup"); }
-function renderLogin() { state.me = null; state.csrf = ""; authForm("login"); }
+function renderLogin() {
+  stopRunTracking(true);
+  state.me = null; state.csrf = ""; authForm("login");
+}
 
 async function enterApplication() {
   const me = await api("/api/me");
@@ -130,34 +157,37 @@ async function enterApplication() {
 
 function applyPermissions() {
   const writable = can("resource.write");
-  ["#agents-new", "#btn-new", "#btn-del", "#btn-save", "#btn-models", "#media-upload-btn"]
+  ["#agents-new", "#flows-new", "#btn-new", "#btn-del", "#btn-save", "#btn-models", "#media-upload-btn"]
     .forEach(selector => { const el = $(selector); if (el) el.hidden = !writable; });
   $("#btn-gov").hidden = !(can("release.approve") || can("audit.read") || writable);
 }
 
 async function loadApplicationData() {
-  state.graph = null; state.lastRun = null; state.govResource = null;
+  stopRunTracking(true);
+  state.graph = null; state.lastRun = null; state.govResource = null; state.dirty = false;
   state.kbDocs = {}; state.mcpTools = {}; state.chatTarget = null;
   ["#gov-panel", "#res-panel", "#media-panel", "#chat-panel"]
     .forEach(selector => $(selector)?.classList.remove("open"));
   [state.nodeTypes, state.agents, state.policy] = await Promise.all([
     api("/api/node-types"), api("/api/agents"), api("/api/governance/policy")]);
   renderPalette();
-  const first = await loadFlowList();
-  if (first) await loadFlow(first);
-  else { state.graph = null; renderInspector(); renderFlowGovernance(); }
+  await loadFlowList();
+  state.graph = null; renderInspector(); renderFlowGovernance();
   await Promise.allSettled([loadMedia(), loadResources()]);
   switchView("agents");
   state.booted = true;
+  await restoreRunTracking();
 }
 
 $("#workspace-select").onchange = async e => {
+  stopRunTracking(true);
   state.workspaceId = e.target.value;
   localStorage.setItem("flow-studio-workspace", state.workspaceId);
   try { await enterApplication(); }
   catch (error) { showApiError(error, "切换 Workspace 失败"); }
 };
 $("#btn-logout").onclick = async () => {
+  stopRunTracking(true);
   try { await api("/api/auth/logout", { method: "POST" }); }
   catch { /* 本地会话失效时仍回到登录页 */ }
   localStorage.removeItem("flow-studio-workspace");
@@ -173,10 +203,23 @@ function toast(msg, kind = "") {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.style.display = "none"), kind === "err" ? 4200 : 2400);
 }
-function openModal(html) { $("#modal").innerHTML = html; $("#modal-mask").classList.add("open"); }
-function closeModal() { $("#modal-mask").classList.remove("open"); }
+function openModal(html) {
+  delete $("#modal").dataset.runView; delete $("#modal").dataset.runNode;
+  $("#modal").classList.remove("agent-editor");
+  $("#modal").innerHTML = html; $("#modal-mask").classList.add("open");
+}
+function closeModal() {
+  $("#modal-mask").classList.remove("open");
+  delete $("#modal").dataset.runView;
+  delete $("#modal").dataset.runNode;
+}
 $("#modal-mask").addEventListener("mousedown", e => { if (e.target.id === "modal-mask") closeModal(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  cancelCanvasGesture();
+  if ($("#modal-mask").classList.contains("open")) closeModal();
+  else if (state.viewMode === "flows-editor" && state.sel) select(null);
+});
 
 function showApiError(error, fallback = "操作失败") {
   const violations = error?.policy?.violations || [];
@@ -411,21 +454,27 @@ function bindVersionActions(body, versions) {
 }
 
 async function previewVersion(version) {
+  const scope = runScope();
   let body;
   if (version.resource_type === "flow") {
     const inputs = await promptInputs(version.snapshot); if (inputs === null) return;
-    body = { inputs };
+    body = { inputs, background: true };
   } else {
     const message = await modalValue({ title: `预览智能体 v${version.version_no}`,
       label: "消息", required: true, multiline: true });
     if (message === null) return;
     body = { message };
   }
+  if (scope !== runScope()) return;
+  if (version.resource_type === "flow") {
+    await submitRun(() => governanceAction("flow", version.resource_id,
+      version.version_no, "preview", body));
+    return;
+  }
   try {
     const result = await governanceAction(version.resource_type, version.resource_id,
       version.version_no, "preview", body);
-    if (version.resource_type === "flow") await animateRun(result);
-    else openModal(`<h2>预览结果</h2><div class="res-snippet">${esc(result.text || result.error || "（空）")}</div>
+    openModal(`<h2>预览结果</h2><div class="res-snippet">${esc(result.text || result.error || "（空）")}</div>
       <div class="btn-row"><button id="preview-close" class="primary">关闭</button></div>`),
       $("#preview-close").onclick = closeModal;
     toast("预览完成", "ok");
@@ -469,7 +518,7 @@ function addMemberModal() {
   openModal(`<h2>添加成员</h2>
     <div class="field"><label>用户名</label><input id="member-user"></div>
     <div class="field"><label>显示名称</label><input id="member-name"></div>
-    <div class="field"><label>初始密码（新用户至少 10 位）</label><input id="member-pass" type="password"></div>
+    <div class="field"><label>初始密码（仅新用户）</label><input id="member-pass" type="password"></div>
     <div class="field"><label>角色</label><select id="member-role">
       <option value="viewer">viewer</option><option value="editor">editor</option>
       ${state.me.workspace.role === "owner" ? '<option value="admin">admin</option>' : ""}</select></div>
@@ -645,11 +694,14 @@ function nodeSub(n) {
     case "template": return (p.template || "").slice(0, 40).replace(/\n/g, " ") || "空模板";
     case "end": return (p.output || "").slice(0, 40).replace(/\n/g, " ") || "空回复";
     case "http": return `${p.method || "GET"} ${(p.url || "").slice(0, 26)}`;
+    case "condition": return `取值: ${p.source || "input.message"}`;
     case "storyboard": return `${p.shot_count || 4} 镜 · ${p.aspect_ratio || "16:9"}`;
     case "character": return `${p.name || "角色"} · ${(p.views || []).length} 方位`;
     case "keyframe": return `来源 ${(p.shots_source || "").slice(0, 24)}`;
     case "shot_video": return `每镜 ${p.duration ?? 3}s · ${p.aspect_ratio || "继承分镜"}`;
     case "merge_video": return `来源 ${(p.clips_source || "").slice(0, 26)}`;
+    case "voiceover": return `${p.voice || "继承音色"} · ${p.speed ?? 1}x`;
+    case "video_compose": return `${p.burn_subtitles === false ? "外挂字幕" : "烧录字幕"} · ${(p.clips_source || "").slice(0, 18)}`;
     case "asset": return p.asset_id ? `素材 ${p.asset_id}` : "未选择素材";
     case "intent": {
       const names = (p.intents || []).map(i => i.name).filter(Boolean);
@@ -662,6 +714,8 @@ function nodeSub(n) {
     case "ai_agent": {
       const a = state.aiAgents.find(x => x.id === p.ai_agent_id);
       if (!a) return p.ai_agent_id || "未选择智能体";
+      if (a.runtime === "customer-agent")
+        return `${a.name} · Customer Agent · ${p.skill_id || "未选 Skill"}`;
       return a.flow_id ? `${a.name} · 流程:${a.flow_id}` : `${a.name} · 对话式`;
     }
     case "kb": {
@@ -682,7 +736,7 @@ function nodeSub(n) {
 /* 边：持久元素 + diff 更新（避免 innerHTML 全量重建） */
 function edgeLabel(e, from) {
   const isElse = (e.branch || "").trim().toLowerCase() === "else";
-  if (from.type === "condition") return isElse ? "else" : (e.branch || "");
+  if (from.type === "condition") return conditionOutputMode(from) ? "输出" : conditionRuleLabel(e);
   if (from.type === "intent") return isElse ? "else" : (e.branch || "");
   return "";
 }
@@ -758,6 +812,25 @@ function closeDrawers() {
   $("#media-panel").classList.remove("open");
   $("#res-panel").classList.remove("open");
 }
+function captureCanvasPointer(e) {
+  // 捕获到稳定的画布容器，节点移出视口或鼠标在容器外松开仍能结束拖拽。
+  try { wrap.setPointerCapture(e.pointerId); } catch { /* 指针可能已被浏览器取消 */ }
+}
+function cancelCanvasGesture() {
+  const ended = drag;
+  const pointers = new Set(activePtrs.keys());
+  if (ended) pointers.add(ended.pointerId);
+  // 先清状态，再释放捕获；lostpointercapture 可能在释放时回调。
+  drag = null; pinch = null; activePtrs.clear();
+  wrap.classList.remove("panning");
+  $("#temp-edge")?.remove();
+  for (const id of pointers) {
+    if (wrap.hasPointerCapture(id)) wrap.releasePointerCapture(id);
+  }
+  if (ended?.mode === "node" && nodeById(ended.id)) updateEdgesFor(ended.id);
+  if (ended?.mode === "pan") updateVisibility();
+  if (ended) drawMinimap();
+}
 function scheduleFrame() {
   if (frameQueued) return;
   frameQueued = true;
@@ -796,8 +869,10 @@ function movePinch() {
 }
 
 wrap.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
   activePtrs.set(e.pointerId, ptrPos(e));
   if (activePtrs.size === 2) {          // 第二根手指落下 → 切换为双指缩放
+    captureCanvasPointer(e);
     drag = null; wrap.classList.remove("panning");
     $("#temp-edge")?.remove();
     pinch = startPinch();
@@ -807,36 +882,43 @@ wrap.addEventListener("pointerdown", e => {
   if (e.target.closest(".node") || e.target.closest("#run-panel")
       || e.target.closest("#edges") || e.target.closest(".canvas-fab")
       || e.target.closest("#minimap")) return;
-  drag = { mode: "pan", sx: e.clientX, sy: e.clientY,
+  drag = { mode: "pan", pointerId: e.pointerId, sx: e.clientX, sy: e.clientY,
            ox: state.view.x, oy: state.view.y };
+  captureCanvasPointer(e);
+  if (state.sel) select(null);
   wrap.classList.add("panning");
   closeDrawers();                        // 手机：点画布空白收起抽屉
 });
 wrap.addEventListener("pointerdown", e => {
-  if (pinch || activePtrs.size > 1) return;
+  if (e.button !== 0 || pinch || activePtrs.size > 1) return;
   const port = e.target.closest(".port.out");
   if (!port) return;
   e.stopPropagation();
   const nodeEl = port.closest(".node");
-  drag = { mode: "connect", from: nodeEl.dataset.id };
+  drag = { mode: "connect", pointerId: e.pointerId, from: nodeEl.dataset.id };
+  captureCanvasPointer(e);
   const temp = document.createElementNS(svgNS, "path");
   temp.setAttribute("class", "edge temp"); temp.id = "temp-edge";
   edgesSvg.appendChild(temp);
 });
 world.addEventListener("pointerdown", e => {
-  if (pinch || activePtrs.size > 1) return;
+  if (e.button !== 0 || pinch || activePtrs.size > 1) return;
   const nodeEl = e.target.closest(".node");
   if (!nodeEl) return;
   if (e.target.closest(".port.out") || e.target.closest(".del")) return;
   const n = nodeById(nodeEl.dataset.id);
-  drag = { mode: "node", id: n.id, sx: e.clientX, sy: e.clientY,
+  drag = { mode: "node", pointerId: e.pointerId, id: n.id, sx: e.clientX, sy: e.clientY,
            ox: n.pos?.x ?? 0, oy: n.pos?.y ?? 0, moved: false };
+  captureCanvasPointer(e);
   e.preventDefault();
 });
 document.addEventListener("pointermove", e => {
+  if (!activePtrs.has(e.pointerId) && drag?.pointerId !== e.pointerId) return;
+  // 窗口外释放后重入时可能没有 pointerup；不要让无按键的移动继续拖节点。
+  if (e.pointerType === "mouse" && !(e.buttons & 1)) { cancelCanvasGesture(); return; }
   if (activePtrs.has(e.pointerId)) activePtrs.set(e.pointerId, ptrPos(e));
   if (pinch) { if (activePtrs.size >= 2) movePinch(); return; }
-  if (!drag) return;
+  if (!drag || drag.pointerId !== e.pointerId) return;
   const v = state.view;
   if (drag.mode === "pan") {
     state.view = { x: drag.ox + e.clientX - drag.sx, y: drag.oy + e.clientY - drag.sy, s: v.s };
@@ -845,6 +927,7 @@ document.addEventListener("pointermove", e => {
     const dx = (e.clientX - drag.sx) / v.s, dy = (e.clientY - drag.sy) / v.s;
     if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
     const n = nodeById(drag.id);
+    if (!n) { cancelCanvasGesture(); return; }
     n.pos = { x: Math.round(drag.ox + dx), y: Math.round(drag.oy + dy) };
     const el = nodeElOf(drag.id);
     if (el) { el.style.left = `${n.pos.x}px`; el.style.top = `${n.pos.y}px`; }
@@ -858,21 +941,28 @@ document.addEventListener("pointermove", e => {
   }
 });
 function pointerEnd(e) {
+  if (!activePtrs.has(e.pointerId) && drag?.pointerId !== e.pointerId) return;
+  if (pinch) { cancelCanvasGesture(); return; }
   activePtrs.delete(e.pointerId);
-  if (pinch) { if (activePtrs.size < 2) pinch = null; return; }
-  if (!drag) return;
-  if (drag.mode === "pan") wrap.classList.remove("panning");
-  if (drag.mode === "node" && !drag.moved) select({ kind: "node", id: drag.id });
-  if (drag.mode === "connect") {
-    $("#temp-edge")?.remove();
+  if (!drag || drag.pointerId !== e.pointerId) return;
+  const ended = drag;
+  cancelCanvasGesture();
+  if (ended.mode === "node" && !ended.moved) select({ kind: "node", id: ended.id });
+  if (ended.mode === "connect") {
     const nodeEl = document.elementFromPoint(e.clientX, e.clientY)?.closest(".node");
     const to = nodeEl?.dataset.id;
-    if (to && to !== drag.from) connect(drag.from, to);
+    if (to && to !== ended.from) connect(ended.from, to);
   }
-  drag = null;
 }
 document.addEventListener("pointerup", pointerEnd);
-document.addEventListener("pointercancel", pointerEnd);
+document.addEventListener("pointercancel", e => {
+  if (activePtrs.has(e.pointerId) || drag?.pointerId === e.pointerId) cancelCanvasGesture();
+});
+wrap.addEventListener("lostpointercapture", e => {
+  if (activePtrs.has(e.pointerId) || drag?.pointerId === e.pointerId) cancelCanvasGesture();
+});
+window.addEventListener("blur", cancelCanvasGesture);
+document.addEventListener("visibilitychange", () => { if (document.hidden) cancelCanvasGesture(); });
 function zoomAt(cx, cy, factor) {
   const v = state.view;
   const s2 = Math.min(2.5, Math.max(0.2, v.s * factor));
@@ -880,6 +970,7 @@ function zoomAt(cx, cy, factor) {
   applyView(); updateVisibility(); drawMinimap();
 }
 wrap.addEventListener("wheel", e => {
+  if (e.target.closest("#run-panel")) return;
   e.preventDefault();
   const rect = wrap.getBoundingClientRect();
   zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
@@ -911,7 +1002,8 @@ function fitView() {
 
 /* ================= 小地图 ================= */
 const TYPE_HUES = { storyboard: "#db2777", character: "#d97706", keyframe: "#0891b2",
-  shot_video: "#7c3aed", merge_video: "#059669", asset: "#64748b" };
+  shot_video: "#7c3aed", merge_video: "#059669", voiceover: "#2563eb",
+  video_compose: "#0f766e", asset: "#64748b" };
 function drawMinimap() {
   const cv = $("#minimap"), ctx = cv.getContext("2d");
   const ns = state.graph?.nodes || [];
@@ -964,9 +1056,13 @@ function select(sel) {
 function connect(fromId, toId) {
   if (edgesOf().some(e => e.from === fromId && e.to === toId)) return toast("已存在相同连线", "err");
   const from = nodeById(fromId);
-  if (from.type === "condition") askBranch(null, b => {
-    if (b === null) return;
-    state.graph.edges.push({ from: fromId, to: toId, branch: b });
+  if (from.type === "condition" && conditionOutputMode(from)) {
+    if (edgesOf().some(edge => edge.from === fromId)) return toast("输出模式只能连接一个下游节点", "err");
+    state.graph.edges.push({ from: fromId, to: toId }); renderEdges(); markDirty();
+  }
+  else if (from.type === "condition") askConditionRule(null, rule => {
+    if (rule === null) return;
+    state.graph.edges.push({ from: fromId, to: toId, ...rule });
     renderEdges(); markDirty();
   });
   else if (from.type === "intent")
@@ -979,35 +1075,83 @@ function connect(fromId, toId) {
 }
 
 function askBranch(options, cb) {
-  if (options && options.length) {
-    openModal(`
-      <h2>意图分支</h2>
-      <div class="field"><label>命中哪个意图时走这条连线</label>
-        <select id="branch-select">${options.map(o =>
-          `<option value="${esc(o)}">${esc(o)}</option>`).join("")}
-          <option value="else">else —— 兜底（其它/未命中）</option></select></div>
-      <div class="btn-row">
-        <button id="branch-cancel">取消</button>
-        <button id="branch-ok" class="primary">确定</button></div>`);
-  } else {
-    openModal(`
-      <h2>条件分支</h2>
-      <div class="field"><label>分支表达式</label>
-        <input id="branch-input" placeholder="例：match.passed_count > 0">
-        <div class="hint">变量：节点 id（如 match.total）、input.xxx、vars.today；
-          支持 > < == != in and or not、算术。留空用按钮设为 else 兜底。</div></div>
-      <div class="btn-row">
-        <button id="branch-else">else 兜底分支</button>
-        <button id="branch-cancel">取消</button>
-        <button id="branch-ok" class="primary">确定</button></div>`);
-  }
+  openModal(`
+    <h2>意图分支</h2>
+    <div class="field"><label>命中哪个意图时走这条连线</label>
+      <select id="branch-select">${(options || []).map(o =>
+        `<option value="${esc(o)}">${esc(o)}</option>`).join("")}
+        <option value="else">else —— 兜底（其它/未命中）</option></select></div>
+    <div class="btn-row">
+      <button id="branch-cancel">取消</button>
+      <button id="branch-ok" class="primary">确定</button></div>`);
   const finish = v => { closeModal(); cb(v); };
-  $("#branch-ok").onclick = () =>
-    finish(options && options.length ? $("#branch-select").value : $("#branch-input").value.trim());
-  if ($("#branch-else")) $("#branch-else").onclick = () => finish("else");
+  $("#branch-ok").onclick = () => finish($("#branch-select").value);
   $("#branch-cancel").onclick = () => finish(null);
-  const first = options && options.length ? $("#branch-select") : $("#branch-input");
-  first.focus();
+  $("#branch-select").focus();
+}
+
+const CONDITION_OPERATORS = [
+  ["equals", "等于 =="], ["not_equals", "不等于 !="],
+  ["contains", "包含"], ["not_contains", "不包含"],
+  ["greater_than", "大于 >"], ["greater_or_equal", "大于等于 >="],
+  ["less_than", "小于 <"], ["less_or_equal", "小于等于 <="],
+];
+const CONDITION_VALUE_TYPES = [
+  ["string", "文本"], ["number", "数字"], ["boolean", "布尔值"], ["null", "空值 null"],
+];
+function conditionRuleLabel(edge) {
+  if ((edge.branch || "").trim().toLowerCase() === "else") return "else";
+  if (!edge.operator) return edge.branch || "未配置";
+  const symbols = { equals: "==", not_equals: "!=", contains: "包含", not_contains: "不包含",
+    greater_than: ">", greater_or_equal: ">=", less_than: "<", less_or_equal: "<=" };
+  let value = edge.value;
+  if ((edge.value_type || "string") === "string") value = JSON.stringify(String(value ?? ""));
+  else if (edge.value_type === "null") value = "null";
+  return `${symbols[edge.operator] || edge.operator} ${value ?? ""}`.trim();
+}
+function conditionOutputMode(node) {
+  return Array.isArray(node?.params?.outputs);
+}
+function applyConditionRule(edge, rule) {
+  for (const key of ["branch", "operator", "value", "value_type"]) delete edge[key];
+  Object.assign(edge, rule);
+}
+function askConditionRule(edge, cb) {
+  const raw = edge?.operator ? "" : ((edge?.branch || "").toLowerCase() === "else" ? "" : edge?.branch || "");
+  openModal(`
+    <h2>条件分支</h2>
+    <div class="field"><label>比较运算</label><select id="condition-operator">
+      ${CONDITION_OPERATORS.map(([value, label]) => `<option value="${value}" ${edge?.operator === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select></div>
+    <div class="field"><label>比较值类型</label><select id="condition-value-type">
+      ${CONDITION_VALUE_TYPES.map(([value, label]) => `<option value="${value}" ${(edge?.value_type || "string") === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select></div>
+    <div class="field" id="condition-value-row"><label>比较值</label>
+      <input id="condition-value" value="${esc(edge?.value ?? "")}" placeholder="例如 /works"></div>
+    <details ${raw ? "open" : ""}><summary>高级表达式（兼容旧流程）</summary>
+      <div class="field"><label>完整表达式</label>
+        <input id="condition-expression" value="${esc(raw)}" placeholder="例如 match.total > 0">
+        <div class="hint">填写后优先保存高级表达式；只允许受限变量、比较、布尔和算术语法。</div></div>
+    </details>
+    <div class="btn-row">
+      <button id="condition-else">else 兜底分支</button>
+      <button id="condition-cancel">取消</button>
+      <button id="condition-ok" class="primary">确定</button></div>`);
+  const type = $("#condition-value-type"), valueRow = $("#condition-value-row");
+  const syncType = () => { valueRow.style.display = type.value === "null" ? "none" : ""; };
+  type.onchange = syncType; syncType();
+  const finish = value => { closeModal(); cb(value); };
+  $("#condition-else").onclick = () => finish({ branch: "else" });
+  $("#condition-cancel").onclick = () => finish(null);
+  $("#condition-ok").onclick = () => {
+    const expression = $("#condition-expression").value.trim();
+    finish(expression ? { branch: expression } : {
+      operator: $("#condition-operator").value,
+      value_type: type.value,
+      value: type.value === "null" ? null : $("#condition-value").value,
+    });
+  };
+  $("#condition-operator").focus();
 }
 
 /* 节点删除 / 边删除 / 双击改分支 */
@@ -1025,12 +1169,14 @@ edgesSvg.addEventListener("dblclick", e => {
   const edge = edgesOf().find(x => (x._id || "") === p.dataset.id);
   const from = nodeById(edge?.from);
   if (!edge || (from?.type !== "condition" && from?.type !== "intent")) return;
-  const options = from.type === "intent"
-    ? (from.params.intents || []).map(i => i.name).filter(Boolean) : null;
-  askBranch(options, b => {
+  if (from.type === "condition" && conditionOutputMode(from)) return;
+  if (from.type === "condition") askConditionRule(edge, rule => {
+    if (rule === null) return;
+    applyConditionRule(edge, rule); renderEdges(); markDirty();
+  });
+  else askBranch((from.params.intents || []).map(i => i.name).filter(Boolean), b => {
     if (b === null) return;
-    edge.branch = b;
-    renderEdges(); markDirty();
+    edge.branch = b; renderEdges(); markDirty();
   });
 });
 document.addEventListener("keydown", e => {
@@ -1100,20 +1246,23 @@ function renderEdgeInfo(box) {
   box.innerHTML = `
     <h3>连线</h3>
     <div class="empty-tip">${esc(from?.label || edge.from)} → ${esc(to?.label || edge.to)}</div>
-    ${from?.type === "condition" ? `
-      <div class="field"><label>分支表达式</label><input id="e-branch" value="${esc(edge.branch || "")}"></div>
+    ${from?.type === "condition" && !conditionOutputMode(from) ? `
+      <div class="field"><label>取值路径</label><input value="${esc(from.params?.source || "input.message")}" disabled></div>
+      <div class="field"><label>比较规则</label><div class="res-snippet">${esc(conditionRuleLabel(edge))}</div></div>
       <div class="btn-row">
-        <button id="e-else">设为 else</button>
+        <button id="e-edit">编辑规则</button>
         <button id="e-del" class="danger">删除连线</button>
-        <button id="e-ok" class="primary">应用</button></div>` : `
+      </div>` : `
       <div class="btn-row"><button id="e-del" class="danger">删除连线</button></div>`}`;
   $("#e-del").onclick = () => {
     state.graph.edges = edgesOf().filter(x => x !== edge);
     select(null); renderEdges(); markDirty();
   };
-  if ($("#e-ok")) {
-    $("#e-ok").onclick = () => { edge.branch = $("#e-branch").value.trim() || "else"; renderEdges(); markDirty(); };
-    $("#e-else").onclick = () => { $("#e-branch").value = "else"; };
+  if ($("#e-edit")) {
+    $("#e-edit").onclick = () => askConditionRule(edge, rule => {
+      if (rule === null) return;
+      applyConditionRule(edge, rule); renderEdges(); markDirty(); renderInspector();
+    });
   }
 }
 
@@ -1130,6 +1279,7 @@ function renderNodeForm(box) {
   }).join("");
   const agentFields = n.type === "agent" ? agentFieldHtml(n) : "";
   const intentFields = n.type === "intent" ? intentFieldHtml(n) : "";
+  const conditionFields = n.type === "condition" ? conditionBranchesHtml(n) : "";
   const viewsFields = viewsFieldHtml(n);
   const assetFields = assetFieldHtml(n);
   const platformFields = platformFieldHtml(n);
@@ -1140,6 +1290,7 @@ function renderNodeForm(box) {
     ${fields}
     ${agentFields}
     ${intentFields}
+    ${conditionFields}
     ${platformFields}
     ${viewsFields}
     ${assetFields}
@@ -1149,10 +1300,82 @@ function renderNodeForm(box) {
   bindFormFields(n);
   if (n.type === "agent") bindAgentSelects(n);
   if (n.type === "intent") bindIntentEditor(n);
+  if (n.type === "condition") bindConditionBranches(n);
   if (n.type === "character") bindViewsEditor(n);
   if (n.type === "asset") bindAssetSelect(n);
   bindPlatformFields(n);
   $("#n-del").onclick = () => deleteNode(n.id);
+}
+
+function conditionBranchesHtml(node) {
+  if (conditionOutputMode(node)) {
+    const rules = node.params.outputs || [];
+    return `<div class="ag-sec">判断并输出</div>
+      <div class="field"><label><input type="checkbox" data-condition-output-mode checked style="width:auto"> 使用节点输出模式</label>
+        <div class="hint">按顺序执行受限表达式，第一条命中后输出文本；所有结果走同一条下游连线。</div></div>
+      ${rules.map((rule, index) => `<div class="res-card" data-condition-output-rule="${index}">
+        <div class="field"><label>规则名称</label><input data-condition-output-key="name" value="${esc(rule.name || "")}"></div>
+        <div class="field"><label>判断表达式</label><input data-condition-output-key="expression" value="${esc(rule.expression || "")}" placeholder="input.message == '/contact'"></div>
+        <div class="field"><label>输出模板</label><textarea data-condition-output-key="output" rows="3">${esc(rule.output || "")}</textarea></div>
+        <div class="btn-row"><button type="button" class="danger" data-condition-output-delete="${index}">删除规则</button></div>
+      </div>`).join("")}
+      <div class="btn-row"><button type="button" data-condition-output-add>添加规则</button></div>
+      <div class="field"><label>默认输出</label><textarea data-condition-default-output rows="4">${esc(node.params.default_output || "")}</textarea></div>`;
+  }
+  const edges = edgesOf().filter(edge => edge.from === node.id);
+  return `<div class="ag-sec">分支比较</div>
+    <div class="field"><label><input type="checkbox" data-condition-output-mode style="width:auto"> 使用节点输出模式</label></div>
+    <div class="hint">按顺序判断，第一条命中后停止；else 作为最后兜底。</div>
+    ${edges.map(edge => {
+      const target = nodeById(edge.to);
+      return `<div class="res-kv"><span>${esc(conditionRuleLabel(edge))} → ${esc(target?.label || edge.to)}</span>
+        <button type="button" data-condition-edge="${esc(edgeKey(edge))}">编辑</button></div>`;
+    }).join("") || '<div class="hint">连接下游节点后即可配置比较规则。</div>'}`;
+}
+function bindConditionBranches(node) {
+  const mode = $("#insp-body [data-condition-output-mode]");
+  if (mode) mode.onchange = () => {
+    if (mode.checked) {
+      node.params.outputs = [{ name: "rule_1", expression: "input.message == '/command'", output: "" }];
+      node.params.default_output = "处理访客请求：{{input.message}}";
+    } else {
+      delete node.params.outputs;
+      delete node.params.default_output;
+    }
+    refreshNodeEl(node); markDirty(); renderEdges(); renderInspector();
+  };
+  $$("#insp-body [data-condition-output-rule]").forEach(card => {
+    const index = Number(card.dataset.conditionOutputRule);
+    card.querySelectorAll("[data-condition-output-key]").forEach(input => input.oninput = () => {
+      const rule = node.params.outputs?.[index];
+      if (!rule) return;
+      rule[input.dataset.conditionOutputKey] = input.value;
+      refreshNodeEl(node); markDirty();
+    });
+  });
+  $$("#insp-body [data-condition-output-delete]").forEach(button => button.onclick = () => {
+    node.params.outputs.splice(Number(button.dataset.conditionOutputDelete), 1);
+    refreshNodeEl(node); markDirty(); renderInspector();
+  });
+  const add = $("#insp-body [data-condition-output-add]");
+  if (add) add.onclick = () => {
+    const index = node.params.outputs.length + 1;
+    node.params.outputs.push({ name: `rule_${index}`, expression: "", output: "" });
+    refreshNodeEl(node); markDirty(); renderInspector();
+  };
+  const fallback = $("#insp-body [data-condition-default-output]");
+  if (fallback) fallback.oninput = () => {
+    node.params.default_output = fallback.value;
+    refreshNodeEl(node); markDirty();
+  };
+  $$("#insp-body [data-condition-edge]").forEach(button => button.onclick = () => {
+    const edge = edgesOf().find(item => edgeKey(item) === button.dataset.conditionEdge);
+    if (!edge) return;
+    askConditionRule(edge, rule => {
+      if (rule === null) return;
+      applyConditionRule(edge, rule); renderEdges(); markDirty(); renderInspector();
+    });
+  });
 }
 
 function formField(n, f) {
@@ -1233,24 +1456,111 @@ function actionParamsHint(agent, action) {
     `${p.key}${p.required ? "*" : ""}（${p.type || "string"}）${p.description ? " — " + p.description : ""}`).join("；");
 }
 
+function dependencyKey(type, id) { return `${type}:${id}`; }
+function flowAgentIds(flow) {
+  if (state.graph?.id === flow.id) return [...new Set((state.graph.nodes || [])
+    .filter(node => node.type === "ai_agent")
+    .map(node => String(node.params?.ai_agent_id || "").trim()).filter(Boolean))];
+  return flow.ai_agent_ids || [];
+}
+function dependencyGraph() {
+  const graph = new Map();
+  const ensure = key => { if (!graph.has(key)) graph.set(key, new Set()); return graph.get(key); };
+  for (const agent of state.aiAgents || []) {
+    const from = dependencyKey("agent", agent.id); ensure(from);
+    if (agent.flow_id) ensure(from).add(dependencyKey("flow", agent.flow_id));
+  }
+  for (const flow of state.flows || []) {
+    const from = dependencyKey("flow", flow.id); ensure(from);
+    for (const agentId of flowAgentIds(flow))
+      ensure(from).add(dependencyKey("agent", agentId));
+  }
+  if (state.graph?.id && !(state.flows || []).some(flow => flow.id === state.graph.id)) {
+    const from = dependencyKey("flow", state.graph.id); ensure(from);
+    for (const agentId of flowAgentIds(state.graph))
+      ensure(from).add(dependencyKey("agent", agentId));
+  }
+  for (const targets of graph.values()) for (const target of targets) ensure(target);
+  return graph;
+}
+function dependencyPath(start, target) {
+  const graph = dependencyGraph();
+  const queue = [[start, [start]]], visited = new Set();
+  while (queue.length) {
+    const [current, path] = queue.shift();
+    if (current === target) return path;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const next of graph.get(current) || [])
+      if (!visited.has(next) || next === target) queue.push([next, [...path, next]]);
+  }
+  return null;
+}
+function dependencyLabel(key) {
+  const [type, ...idParts] = key.split(":"), id = idParts.join(":");
+  if (type === "agent") {
+    const item = state.aiAgents.find(agent => agent.id === id);
+    return `智能体「${item?.name || id}」`;
+  }
+  const item = state.flows.find(flow => flow.id === id);
+  return `流程「${item?.name || id}」`;
+}
+function dependencyCycleReason(fromType, fromId, toType, toId) {
+  if (!fromId || !toId) return "";
+  const from = dependencyKey(fromType, fromId), to = dependencyKey(toType, toId);
+  const path = dependencyPath(to, from);
+  return path ? `会形成循环：${[from, ...path].map(dependencyLabel).join(" → ")}` : "";
+}
+
+function plannedAgentCycleReason(referencingFlowId, targetFlowId) {
+  if (!referencingFlowId || !targetFlowId) return "";
+  const target = dependencyKey("flow", targetFlowId);
+  const referencing = dependencyKey("flow", referencingFlowId);
+  const path = dependencyPath(target, referencing);
+  if (!path) return "";
+  return `会形成循环：${[
+    referencing,
+    "agent:__new__",
+    ...path,
+  ].map(key => key === "agent:__new__" ? "新智能体" : dependencyLabel(key)).join(" → ")}`;
+}
+
 /* ================= 智能体平台节点编辑器（智能体/知识库/技能/MCP/工具） ================= */
 function platformFieldHtml(n) {
   const p = n.params || {};
   if (n.type === "ai_agent") {
-    const opts = state.aiAgents.map(a =>
-      `<option value="${esc(a.id)}" ${a.id === p.ai_agent_id ? "selected" : ""}>
-        ${esc(a.name)}（${esc(a.id)}）</option>`).join("");
+    const options = state.aiAgents.map(a => ({
+      agent: a,
+      reason: dependencyCycleReason("flow", state.graph?.id || "", "agent", a.id),
+    }));
+    const opts = options.map(({ agent: a, reason }) =>
+      `<option value="${esc(a.id)}" ${a.id === p.ai_agent_id ? "selected" : ""}
+        ${reason ? `disabled title="${esc(reason)}"` : ""}>
+        ${esc(a.name)}（${esc(a.id)}）${reason ? " · 会形成循环" : ""}</option>`).join("");
     const cur = state.aiAgents.find(a => a.id === p.ai_agent_id);
+    const blocked = options.filter(option => option.reason);
+    const skillOptions = (cur?.skill_ids || []).map(skill =>
+      `<option value="${esc(skill)}" ${skill === p.skill_id ? "selected" : ""}>${esc(skill)}</option>`).join("");
+    const dynamicSkill = String(p.skill_id || "").includes("{{");
     return `
-      <div class="field"><label>选择智能体（资源库中创建/编辑）</label>
-        <select id="ai-agent-select">${opts || '<option value="">（暂无智能体）</option>'}</select>
-        <button id="ai-agent-open" type="button" style="margin-top:5px">管理智能体 →</button>
+      <div class="field"><label>选择已有智能体</label>
+        <select id="ai-agent-select"><option value="">（请选择智能体）</option>${opts}</select>
+        <div class="btn-row">
+          ${can("resource.write") ? '<button id="ai-agent-new" type="button" class="primary">＋ 新建智能体</button>' : ""}
+          <button id="ai-agent-open" type="button">管理智能体</button>
+        </div>
+        ${blocked.length ? '<div class="hint">会回到当前流程的智能体已禁用，避免直接或间接循环。</div>' : ""}
         ${cur ? `<div class="hint">${esc(cur.description || "")}
           · 绑定：${[...(cur.kb_ids || []).map(x => "知识库:" + x),
                     ...(cur.skill_ids || []).map(x => "技能:" + x),
                     ...(cur.tool_ids || []).map(x => "工具:" + x),
                     ...(cur.mcp_servers || []).map(x => "MCP:" + x)].join("、") || "无"}
-          ${cur.memory ? " · 记忆开" : ""}</div>` : ""}</div>`;
+          ${cur.memory ? " · 记忆开" : ""}</div>` : ""}
+        ${cur?.runtime === "customer-agent" ? `<div class="field"><label>该节点执行的 Skill</label>
+          <select id="ai-agent-skill">
+            ${dynamicSkill ? `<option value="${esc(p.skill_id)}" selected>由上游分支动态选择（${esc(p.skill_id)}）</option>` : ""}
+            <option value="">（请选择 Skill）</option>${skillOptions}
+          </select><div class="hint">Flow 只能选择该 Agent 已绑定的 Skill。</div></div>` : ""}</div>`;
   }
   if (n.type === "kb") {
     const ids = p.kb_ids || [];
@@ -1310,8 +1620,28 @@ function bindPlatformFields(n) {
   const p = n.params || {};
   if (n.type === "ai_agent") {
     const sel = $("#ai-agent-select");
-    if (sel) sel.onchange = () => { p.ai_agent_id = sel.value; refreshNodeEl(n); markDirty(); };
+    if (sel) sel.onchange = () => {
+      const reason = dependencyCycleReason("flow", state.graph?.id || "", "agent", sel.value);
+      if (reason) { sel.value = p.ai_agent_id || ""; return toast(reason, "err"); }
+      p.ai_agent_id = sel.value; refreshNodeEl(n); markDirty();
+      const selected = state.aiAgents.find(a => a.id === sel.value);
+      p.skill_id = selected?.runtime === "customer-agent" ? (selected.skill_ids || [])[0] || "" : "";
+      renderInspector();
+    };
+    $("#ai-agent-new")?.addEventListener("click", () => agentEditModal(null, {
+      referencingFlowId: state.graph?.id || "",
+      onSaved: saved => {
+        p.ai_agent_id = saved.id;
+        refreshNodeEl(n);
+        markDirty();
+        renderInspector();
+      },
+    }));
     $("#ai-agent-open")?.addEventListener("click", () => openResPanel("agents"));
+    const skill = $("#ai-agent-skill");
+    if (skill) skill.onchange = () => {
+      p.skill_id = skill.value; refreshNodeEl(n); markDirty();
+    };
   }
   if (n.type === "kb") {
     $$('#insp-body [data-kbid]').forEach(cb => cb.onchange = () => {
@@ -1437,6 +1767,7 @@ function bindAssetSelect(n) {
 
 /* ================= 运行输出展示（含图片/视频预览） ================= */
 function runOf(nodeId) {
+  if (!runMatchesCanvas()) return null;
   return (state.lastRun?.node_runs || []).find(x => x.node_id === nodeId) || null;
 }
 function mediaThumbHtml(a) {
@@ -1455,106 +1786,343 @@ function mediaGridFromOutput(output) {
   if (Array.isArray(output.views)) items = items.concat(output.views);
   if (Array.isArray(output.frames)) items = items.concat(output.frames);
   if (Array.isArray(output.clips)) items = items.concat(output.clips);
-  if (output.url && output.path) items = [output];
+  if (Array.isArray(output.tracks)) items = items.concat(output.tracks);
+  if (output.url && output.path) items.unshift(output);
+  if (output.audio) items.push(output.audio);
+  if (output.subtitle) items.push(output.subtitle);
   if (!items.length) return "";
   const cells = items.map(it => {
     if (!it.url && !it.path) return "";
-    const kind = String(it.path || "").endsWith(".mp4") || String(it.url || "").includes(".mp4")
-      ? "video" : "image";
+    const ref = String(it.path || it.url || "").toLowerCase();
+    const kind = it.kind || (ref.endsWith(".mp4") ? "video"
+      : ref.endsWith(".wav") || ref.endsWith(".mp3") ? "audio"
+        : ref.endsWith(".srt") ? "file" : "image");
     const url = it.url || `/media/files/${it.path}`;
-    return kind === "video"
-      ? `<video class="media-thumb" src="${esc(url)}" controls preload="metadata"></video>`
-      : `<img class="media-thumb" src="${esc(url)}" alt="" loading="lazy">`;
+    if (kind === "video")
+      return `<video class="media-thumb" src="${esc(url)}" controls preload="metadata"></video>`;
+    if (kind === "audio")
+      return `<audio class="media-thumb" src="${esc(url)}" controls preload="metadata"></audio>`;
+    if (kind === "file")
+      return `<a class="media-thumb media-file" href="${esc(url)}" download>下载 ${esc(it.name || "字幕文件")}</a>`;
+    return `<img class="media-thumb" src="${esc(url)}" alt="" loading="lazy">`;
   }).filter(Boolean).join("");
   return cells ? `<div class="media-grid">${cells}</div>` : "";
 }
 function renderRunOutput(nodeId) {
   const run = state.lastRun;
-  if (!run) return "";
+  if (!run || !runMatchesCanvas()) return "";
   const part = nodeId ? runOf(nodeId) : null;
   if (nodeId && !part) return "";
-  const data = nodeId ? { output: part.output, error: part.error, status: part.status }
-                      : { output: run.output, error: run.error, status: run.status };
+  const data = nodeId ? part : run;
   return `
     <h3 style="margin-top:10px">${nodeId ? "节点输入输出" : "流程输出"}</h3>
     <div class="field"><label>状态：${data.status || "-"}</label></div>
     ${data.error ? `<div class="field"><label style="color:var(--err)">错误</label>
       <div class="json-view">${esc(data.error)}</div></div>` : ""}
+    ${tracebackHtml(data.traceback)}
     ${mediaGridFromOutput(data.output)}
     <div class="json-view">${esc(fmtJson(data.output))}</div>`;
 }
 function fmtJson(v) { try { return JSON.stringify(v, null, 2); } catch { return String(v); } }
 
-/* ================= 运行状态高亮 ================= */
-function applyBadge(el, r) {
-  const names = { success: "成功", failed: "失败", skipped: "降级", running: "运行中" };
-  const badge = el.querySelector(".run-badge");
-  if (!badge) return;
-  badge.textContent = names[r.status] || "";
+/* ================= 持久运行与增量日志 ================= */
+const RUN_STATUS = { queued: "排队中", pending: "等待", running: "运行中", success: "成功",
+  failed: "失败", skipped: "跳过 / 降级", interrupted: "已中断" };
+const terminalRun = run => ["success", "failed", "interrupted"].includes(run?.status);
+function runScope() { return `${state.me?.user?.user_id || ""}:${state.workspaceId}`; }
+function runStorageKey() { return `flow-studio-active-run:${runScope()}`; }
+function rememberRun(run) {
+  try { localStorage.setItem(runStorageKey(), run.run_id); } catch { /* 存储不可用仍可实时跟踪 */ }
 }
-function highlightRun(upTo = Infinity) {
-  const runs = (state.lastRun?.node_runs || []).slice(0, upTo === Infinity ? undefined : upTo + 1);
+function forgetRun(runId) {
+  try {
+    if (localStorage.getItem(runStorageKey()) === runId) localStorage.removeItem(runStorageKey());
+  } catch { /* 忽略浏览器存储限制 */ }
+}
+function runMatchesCanvas() {
+  const run = state.lastRun, graph = state.graph;
+  if (!run || !graph || run.flow_id !== graph.id) return false;
+  // 旧记录没有执行图，不能将它的状态误叠到当前版本。
+  if (!run.graph) return false;
+  const shape = g => JSON.stringify({ nodes: (g.nodes || []).map(n => ({ id: n.id,
+    type: n.type, label: n.label, params: n.params || {} })), edges: (g.edges || []).map(e =>
+    ({ from: e.from, to: e.to, branch: e.branch || "" })) });
+  return shape(run.graph) === shape(graph);
+}
+function tracebackHtml(value) {
+  return value ? `<details class="run-traceback"><summary>完整异常堆栈</summary><pre>${esc(value)}</pre></details>` : "";
+}
+function applyBadge(el, r) {
+  const badge = el.querySelector(".run-badge");
+  if (badge) badge.textContent = RUN_STATUS[r.status] || r.status;
+}
+function highlightRun() {
+  const runs = runMatchesCanvas() ? state.lastRun.node_runs || [] : [];
   const byNode = Object.fromEntries(runs.map(r => [r.node_id, r]));
   for (const el of nodeEls.values()) {
     el.classList.remove("st-running", "st-success", "st-failed", "st-skipped");
     const r = byNode[el.dataset.id];
     if (!r || r.status === "pending") { el.querySelector(".run-badge").textContent = ""; continue; }
-    el.classList.add(`st-${r.status}`);
-    applyBadge(el, r);
+    el.classList.add(`st-${r.status}`); applyBadge(el, r);
   }
 }
-
-async function animateRun(run) {
-  state.lastRun = run;
-  for (const el of nodeEls.values())
-    el.classList.remove("st-running", "st-success", "st-failed", "st-skipped");
-  const runs = run.node_runs || [];
-  for (let i = 0; i < runs.length; i++) {
-    const el = nodeElOf(runs[i].node_id);
-    if (!el) continue;
-    el.classList.add("st-running");
-    await sleep(Math.min(160, 60 + (runs[i].ms || 0) / 8));
-    el.classList.remove("st-running");
-    highlightRun(i);
-  }
-  highlightRun();
-  renderRunPanel(run);
-  renderInspector();
-  loadMedia();   // 生成的素材入库后刷新素材库（异步，不阻塞）
-}
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-/* ================= 运行面板 ================= */
-function renderRunPanel(run) {
-  const panel = $("#run-panel");
-  panel.classList.add("open");
-  $("#rp-title").textContent = `运行 ${run.run_id} · ${run.flow_name}`;
-  const st = $("#rp-status");
-  st.textContent = run.status === "success" ? "✅ 成功" : `❌ 失败：${run.error || ""}`;
-  st.style.color = run.status === "success" ? "var(--ok)" : "var(--err)";
-  const names = { success: "成功", failed: "失败", skipped: "降级" };
-  $("#rp-list").innerHTML = (run.node_runs || []).map(r => {
-    const chip = { success: ["var(--ok-soft)", "var(--ok)"], failed: ["var(--err-soft)", "var(--err)"],
-                   skipped: ["var(--skip-soft)", "var(--ink-2)"] }[r.status]
-      || ["#f2f4f7", "var(--ink-2)"];
-    return `
-    <div class="rp-row" data-node="${esc(r.node_id)}">
-      <span class="st" style="background:${chip[0]};color:${chip[1]}">${names[r.status] || r.status}</span>
-      <b>${esc(r.label)}</b>
-      <span class="errmsg">${esc(r.error || "")}</span>
-      <span class="ms">${r.ms}ms</span></div>`;
-  }).join("");
-  $$("#rp-list .rp-row").forEach(row => row.onclick = () => {
-    const n = nodeById(row.dataset.node);
-    if (n) select({ kind: "node", id: n.id });
+function updateRunControls() {
+  const busy = state.runSubmitting || state.runMonitor.active;
+  ["#btn-run", "#chat-send", "#flow-preview"].forEach(selector => {
+    const el = $(selector); if (el) el.disabled = busy;
   });
 }
+function stopRunTracking(clear = false) {
+  const monitor = state.runMonitor;
+  monitor.generation++;
+  clearTimeout(monitor.timer); monitor.controller?.abort();
+  monitor.timer = null; monitor.controller = null; monitor.onComplete = null; monitor.active = false;
+  if (clear) {
+    state.lastRun = null; state.runSubmitting = false;
+    monitor.events = []; monitor.seq = 0;
+    $("#run-panel").classList.remove("open");
+    $("#rp-list").replaceChildren(); $("#rp-logs").replaceChildren();
+    $("#rp-output").replaceChildren(); $("#run-status").textContent = "";
+    if ($("#modal").dataset.runView) closeModal();
+    highlightRun(); updateRunControls();
+  }
+}
+function showRunTab(tab) {
+  $$("[data-run-tab]").forEach(button => button.setAttribute("aria-selected", String(button.dataset.runTab === tab)));
+  $("#rp-list").hidden = tab !== "nodes"; $("#rp-logs").hidden = tab !== "logs";
+  $("#rp-output").hidden = tab !== "output";
+  if (tab === "logs" && $("#rp-follow").checked) $("#rp-logs").scrollTop = $("#rp-logs").scrollHeight;
+}
+$$("[data-run-tab]").forEach(button => button.onclick = () => showRunTab(button.dataset.runTab));
+$("#rp-follow").onchange = () => {
+  if ($("#rp-follow").checked) $("#rp-logs").scrollTop = $("#rp-logs").scrollHeight;
+};
+function renderRunPanel(run) {
+  $("#rp-title").textContent = `${run.flow_name || run.flow_id} · ${run.run_id}`;
+  const running = (run.node_runs || []).filter(n => n.status === "running").map(n => n.label || n.node_id);
+  const status = RUN_STATUS[run.status] || run.status;
+  $("#rp-status").textContent = running.length ? `${status}：${running.join("、")}` : status;
+  $("#rp-status").style.color = run.status === "success" ? "var(--ok)"
+    : ["failed", "interrupted"].includes(run.status) ? "var(--err)" : "var(--warn)";
+  $("#run-status").textContent = status;
+  $("#run-status").className = run.status === "success" ? "ok" : terminalRun(run) ? "err" : "";
+  $("#rp-snapshot").disabled = !run.graph;
+  $("#rp-version-note").textContent = !run.graph ? "历史记录未保存执行图，仅展示记录中的节点状态。"
+    : runMatchesCanvas() ? "状态来自本次执行图；点击节点查看本次输入输出。"
+    : "本次执行图与当前画布不同；请打开「执行图快照」查看实际运行节点。";
+  const html = (run.node_runs || []).map(r => `<button class="rp-row" data-node="${esc(r.node_id)}">
+    <span class="st" data-status="${esc(r.status)}">${esc(RUN_STATUS[r.status] || r.status)}</span>
+    <b>${esc(r.label || r.node_id)}</b><span class="errmsg">${esc(r.error || "")}</span>
+    <span class="ms">${r.status === "running" ? "执行中" : r.ms == null ? "" : `${r.ms}ms`}</span></button>`).join("")
+    || '<div class="run-empty">等待节点开始执行…</div>';
+  // 无变化时保留焦点，滚动位置与展开的堆栈。
+  if ($("#rp-list").innerHTML !== html) {
+    $("#rp-list").innerHTML = html;
+    $$("#rp-list [data-node]").forEach(row => row.onclick = () => showRunNode(row.dataset.node));
+  }
+  const output = `${run.error ? `<div class="run-error">${esc(run.error)}</div>` : ""}${tracebackHtml(run.traceback)}
+    ${mediaGridFromOutput(run.output)}<pre class="json-view">${esc(fmtJson(run.output) ?? "暂无输出")}</pre>`;
+  if ($("#rp-output").dataset.value !== output) {
+    $("#rp-output").innerHTML = output; $("#rp-output").dataset.value = output;
+  }
+  highlightRun(); updateRunControls(); refreshRunModal();
+}
+function appendRunEvents(events) {
+  const monitor = state.runMonitor, list = $("#rp-logs");
+  for (const event of events) {
+    if (event.seq <= monitor.seq) continue;
+    monitor.seq = event.seq; monitor.events.push(event);
+    if (list.querySelector(".run-empty")) list.replaceChildren();
+    const row = document.createElement("div"); row.className = "run-log-entry";
+    row.dataset.level = String(event.level || "info").toLowerCase();
+    const date = new Date(event.timestamp), timestamp = Number.isNaN(date.valueOf())
+      ? event.timestamp || "" : date.toLocaleTimeString();
+    row.innerHTML = `<div class="run-log-meta"><time>${esc(timestamp)}</time>
+      <span>${esc(event.level || "info")}</span><b>${esc(event.node_label || event.node_id || "流程")}</b>
+      <span>#${esc(event.seq)}</span></div><pre>${esc(event.message || event.type)}</pre>${tracebackHtml(event.traceback)}`;
+    list.append(row);
+  }
+  $("#rp-log-count").textContent = monitor.events.length;
+  if ($("#rp-follow").checked) list.scrollTop = list.scrollHeight;
+}
+function trackRun(run, { onComplete = null } = {}) {
+  stopRunTracking();
+  const monitor = state.runMonitor;
+  monitor.seq = 0; monitor.events = []; monitor.retries = 0; monitor.onComplete = onComplete;
+  monitor.active = !terminalRun(run);
+  state.lastRun = run;
+  // 查看已完成的历史，不覆盖仍在后台执行的恢复入口。
+  if (!terminalRun(run)) rememberRun(run);
+  $("#rp-logs").innerHTML = '<div class="run-empty">正在读取运行日志…</div>';
+  $("#rp-log-count").textContent = "0";
+  $("#rp-output").dataset.value = "";
+  $("#rp-connection").textContent = "正在连接…";
+  $("#run-panel").classList.add("open"); switchView("flows-editor");
+  $("#gov-panel").classList.remove("open");
+  renderRunPanel(run);
+  pollRun(monitor.generation, runScope());
+}
+async function pollRun(generation, scope) {
+  const monitor = state.runMonitor;
+  if (generation !== monitor.generation || scope !== runScope() || !state.lastRun) return;
+  const runId = state.lastRun.run_id;
+  monitor.controller = new AbortController();
+  let delay = 500;
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/events?after=${monitor.seq}&limit=200`,
+      { signal: monitor.controller.signal });
+    if (generation !== monitor.generation || scope !== runScope()) return;
+    monitor.retries = 0; state.lastRun = data.run;
+    appendRunEvents(data.events || []);
+    monitor.seq = Math.max(monitor.seq, data.next_seq || 0);
+    renderRunPanel(data.run);
+    $("#rp-connection").textContent = data.has_more ? "正在补齐日志…" : terminalRun(data.run) ? "日志已同步" : "实时更新中";
+    // 结束状态可能先于分页日志到达，必须排空事件后再停止。
+    if (terminalRun(data.run) && !data.has_more) {
+      monitor.active = false; updateRunControls();
+      forgetRun(runId);
+      if (!monitor.events.length) $("#rp-logs").innerHTML = '<div class="run-empty">此运行没有事件日志；旧记录可在节点和输出中查看结果。</div>';
+      const onComplete = monitor.onComplete; monitor.onComplete = null;
+      if (runMatchesCanvas() && !$("#inspector").contains(document.activeElement)) renderInspector();
+      loadMedia().catch(() => {});
+      onComplete?.(data.run);
+      return;
+    }
+    if (data.has_more) delay = 0;
+  } catch (error) {
+    if (generation !== monitor.generation || scope !== runScope() || error.name === "AbortError") return;
+    if ([401, 403, 404].includes(error.status)) {
+      $("#rp-connection").textContent = `无法继续读取：${error.message}`;
+      monitor.active = false; updateRunControls();
+      forgetRun(runId); return;
+    }
+    monitor.retries++;
+    delay = Math.min(10000, 500 * 2 ** Math.min(monitor.retries, 5));
+    $("#rp-connection").textContent = `连接中断，${delay / 1000} 秒后重连（不会重新执行）`;
+  }
+  if (generation === monitor.generation && scope === runScope())
+    monitor.timer = setTimeout(() => pollRun(generation, scope), delay);
+}
+async function restoreRunTracking() {
+  let runId; try { runId = localStorage.getItem(runStorageKey()); } catch { return; }
+  if (!runId) return;
+  const scope = runScope(), generation = state.runMonitor.generation;
+  try {
+    const run = await api(`/api/runs/${encodeURIComponent(runId)}`);
+    if (scope !== runScope() || generation !== state.runMonitor.generation) return;
+    if (!state.dirty && run.flow_id && run.flow_id !== state.graph?.id) {
+      try {
+        await loadFlow(run.flow_id, { restoreGeneration: generation });
+      } catch (error) {
+        // 流程被删除或无权读取时，运行记录和执行图快照仍可独立恢复。
+        if (scope === runScope() && error.status !== 401)
+          toast(`无法加载原流程，将恢复运行记录与执行图快照：${error.message}`, "err");
+      }
+    }
+    if (scope === runScope() && generation === state.runMonitor.generation) trackRun(run);
+  } catch (error) {
+    if (scope === runScope() && [403, 404].includes(error.status)) forgetRun(runId);
+    if (error.status !== 401) toast(`恢复运行失败，可从运行记录重试：${error.message}`, "err");
+  }
+}
+async function submitRun(request, options = {}) {
+  if (state.runSubmitting || state.runMonitor.active) {
+    $("#run-panel").classList.add("open"); return toast("已有运行正在跟踪，请等待完成或从运行记录切换。");
+  }
+  const scope = runScope(); state.runSubmitting = true; updateRunControls();
+  try {
+    const run = await request();
+    if (scope !== runScope()) return;
+    if (run) trackRun(run, options);
+  } catch (error) {
+    if (scope === runScope()) showApiError(error, "启动运行失败");
+  } finally {
+    if (scope === runScope()) { state.runSubmitting = false; updateRunControls(); }
+  }
+}
+function showRunNode(nodeId) {
+  const node = state.lastRun?.node_runs?.find(n => n.node_id === nodeId);
+  if (!node) return;
+  openModal(`<h2>${esc(node.label || nodeId)} · 本次运行</h2><div id="run-node-detail"></div>
+    <div class="btn-row"><button id="run-node-close" class="primary">关闭</button></div>`);
+  $("#modal").dataset.runView = "node"; $("#modal").dataset.runNode = nodeId;
+  $("#run-node-close").onclick = closeModal; refreshRunModal();
+}
+function showRunSnapshot() {
+  if (!state.lastRun?.graph) return;
+  openModal('<h2>本次执行图快照</h2><p class="run-caption">只读显示本次实际执行的节点和连线；状态随运行实时更新。</p><div id="run-snapshot"></div><div class="btn-row"><button id="run-snapshot-close" class="primary">关闭</button></div>');
+  $("#modal").dataset.runView = "snapshot";
+  $("#run-snapshot-close").onclick = closeModal; refreshRunModal();
+}
+function refreshRunModal() {
+  const modal = $("#modal"), run = state.lastRun;
+  if (!run || !$("#modal-mask").classList.contains("open")) return;
+  if (modal.dataset.runView === "node") {
+    const node = run.node_runs?.find(n => n.node_id === modal.dataset.runNode);
+    if (!node) return closeModal();
+    const html = `<p>${esc(RUN_STATUS[node.status] || node.status)}${node.ms == null ? "" : ` · ${node.ms}ms`}</p>
+      ${node.error ? `<div class="run-error">${esc(node.error)}</div>` : ""}${tracebackHtml(node.traceback)}
+      ${node.input === undefined ? "" : `<h3>输入</h3><pre class="json-view">${esc(fmtJson(node.input))}</pre>`}
+      <h3>输出</h3>${mediaGridFromOutput(node.output)}<pre class="json-view">${esc(fmtJson(node.output) ?? "暂无输出")}</pre>`;
+    const box = $("#run-node-detail");
+    if (box.dataset.value !== html) { box.innerHTML = html; box.dataset.value = html; }
+  } else if (modal.dataset.runView === "snapshot" && run.graph) {
+    const nodes = run.graph.nodes || [], runs = Object.fromEntries((run.node_runs || []).map(n => [n.node_id, n]));
+    const positions = Object.fromEntries(nodes.map((node, i) => [node.id, {
+      x: Number.isFinite(Number(node.pos?.x)) ? Number(node.pos.x) : 0,
+      y: Number.isFinite(Number(node.pos?.y)) ? Number(node.pos.y) : i * 90 }]));
+    const minX = Math.min(0, ...Object.values(positions).map(p => p.x)), minY = Math.min(0, ...Object.values(positions).map(p => p.y));
+    const width = Math.max(400, ...Object.values(positions).map(p => p.x + 248)) - minX;
+    const height = Math.max(120, ...Object.values(positions).map(p => p.y + 94)) - minY;
+    const edges = (run.graph.edges || []).map(e => {
+      const a = positions[e.from], b = positions[e.to]; if (!a || !b) return "";
+      return `<path d="M ${a.x + 112} ${a.y + 64} L ${b.x + 112} ${b.y}"/><text x="${(a.x + b.x) / 2 + 120}" y="${(a.y + b.y) / 2 + 32}">${esc(e.branch || "")}</text>`;
+    }).join("");
+    const boxes = nodes.map(n => {
+      const p = positions[n.id], status = runs[n.id]?.status || "pending";
+      return `<g class="snapshot-node" data-node="${esc(n.id)}" data-status="${esc(status)}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}：${esc(RUN_STATUS[status] || status)}" transform="translate(${p.x},${p.y})">
+        <rect width="224" height="64" rx="10"/><text x="12" y="25">${esc((n.label || n.id).slice(0, 24))}</text>
+        <text class="snapshot-status" x="12" y="48">${esc(RUN_STATUS[status] || status)}</text></g>`;
+    }).join("");
+    $("#run-snapshot").innerHTML = `<svg viewBox="${minX - 12} ${minY - 12} ${width + 24} ${height + 24}" style="min-width:${Math.min(width, 1100)}px" xmlns="http://www.w3.org/2000/svg"><g class="snapshot-edges">${edges}</g>${boxes}</svg>`;
+    $$("#run-snapshot [data-node]").forEach(el => {
+      el.onclick = () => showRunNode(el.dataset.node);
+      el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showRunNode(el.dataset.node); } };
+    });
+  }
+}
+async function showRunHistory() {
+  const scope = runScope(), flowId = state.graph?.id;
+  try {
+    const result = await api(`/api/runs${flowId ? `?flow_id=${encodeURIComponent(flowId)}` : ""}`);
+    if (scope !== runScope()) return;
+    const runs = Array.isArray(result) ? result : result.runs || [];
+    openModal(`<h2>${esc(state.graph?.name || "全部流程")} · 运行记录</h2><div class="run-history">${runs.map(run =>
+      `<button data-run-id="${esc(run.run_id)}"><b>${esc(RUN_STATUS[run.status] || run.status)}</b><span>${esc(run.started_at || run.created_at || "")}</span><small>${esc(run.run_id)}</small></button>`).join("") || '<p class="run-empty">暂无运行记录</p>'}</div><div class="btn-row"><button id="run-history-close">关闭</button></div>`);
+    $("#modal").dataset.runView = "history";
+    $("#run-history-close").onclick = closeModal;
+    $$("[data-run-id]").forEach(button => button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const run = await api(`/api/runs/${encodeURIComponent(button.dataset.runId)}`);
+        if (scope !== runScope()) return;
+        closeModal(); trackRun(run);
+      } catch (error) { if (scope === runScope()) showApiError(error, "读取运行失败"); }
+      finally { button.disabled = false; }
+    });
+  } catch (error) { if (scope === runScope()) showApiError(error, "读取运行记录失败"); }
+}
+$("#btn-runs").onclick = showRunHistory;
+$("#rp-snapshot").onclick = showRunSnapshot;
 $("#rp-close").onclick = () => $("#run-panel").classList.remove("open");
 
 /* ================= 工具函数 ================= */
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
-function markDirty() { state.dirty = true; }
+function markDirty() {
+  state.dirty = true;
+  if (state.lastRun) renderRunPanel(state.lastRun);
+}
 function maxPos() {
   let x = 40, y = 30;
   for (const n of state.graph?.nodes || []) x = Math.max(x, (n.pos?.x || 0));
@@ -1567,24 +2135,29 @@ async function loadFlowList(selectId) {
   const sel = $("#flow-select");
   sel.innerHTML = state.flows.map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("")
     || '<option value="">（暂无流程）</option>';
-  if (selectId) sel.value = selectId;
+  const preferred = selectId || state.graph?.id;
+  if (preferred && state.flows.some(f => f.id === preferred)) sel.value = preferred;
+  if (state.viewMode === "flows-list") renderFlowsHome();
   return sel.value;
 }
 
-async function loadFlow(id) {
-  if (!id) { state.graph = null; state.lastRun = null; select(null); renderWorld();
+async function loadFlow(id, { restoreGeneration = null } = {}) {
+  if (!id) { state.graph = null; select(null); renderWorld();
     renderInspector(); renderFlowGovernance(); return; }
+  const previousGraph = state.graph, scope = runScope();
   const data = await api(`/api/flows/${encodeURIComponent(id)}`);
+  if (restoreGeneration !== null && (state.dirty || state.graph !== previousGraph
+    || scope !== runScope() || restoreGeneration !== state.runMonitor.generation)) return;
   data._saved = true;
   state.graph = data;
-  state.lastRun = null;
+  $("#flow-select").value = id;
   state.sel = null;
   state.view = { x: 40, y: 30, s: 1 };
   renderWorld(); renderInspector();
   renderFlowGovernance();
   fitView();
   closeDrawers();
-  $("#run-panel").classList.remove("open");
+  if (state.lastRun) renderRunPanel(state.lastRun);
 }
 
 async function saveFlow() {
@@ -1598,10 +2171,13 @@ async function saveFlow() {
     saved._saved = true;
     state.graph = saved;
     state.dirty = false;
+    // Saving replaces edge objects and drops their transient UI ids.
+    state.sel = null;
+    renderWorld();
+    renderInspector();
     renderFlowGovernance();
     toast("草稿已保存", "ok");
     await loadFlowList(g.id);
-    select(null);
   } catch (e) { toast(`保存失败：${e.message}`, "err"); }
 }
 function graphBody() {
@@ -1624,18 +2200,17 @@ function renderFlowGovernance() {
   $("#flow-submit")?.addEventListener("click", () =>
     submitResource("flow", state.graph.id, gov.version));
   $("#flow-preview")?.addEventListener("click", async () => {
-    const inputs = await promptInputs(); if (inputs === null) return;
-    try {
-      const run = await governanceAction("flow", state.graph.id, gov.version,
-        "preview", { inputs });
-      await animateRun(run); toast("预览运行完成", "ok");
-    } catch (error) { showApiError(error, "预览失败"); }
+    const flow = state.graph, scope = runScope();
+    const inputs = await promptInputs(flow); if (inputs === null || scope !== runScope()) return;
+    await submitRun(() => governanceAction("flow", flow.id, gov.version,
+      "preview", { inputs, background: true }));
   });
   $("#flow-versions").onclick = () => openVersions("flow", state.graph.id);
+  updateRunControls();
 }
 
 /* 新建 / 删除流程 */
-$("#btn-new").onclick = () => {
+function openNewFlowModal() {
   openModal(`
     <h2>新建流程</h2>
     <div class="field"><label>流程名称</label><input id="nf-name" placeholder="例：客服工单分流"></div>
@@ -1657,17 +2232,21 @@ $("#btn-new").onclick = () => {
       } });
       closeModal();
       await loadFlowList(g.id);
-      await loadFlow(g.id);
+      await openFlowEditor(g.id);
       toast("已创建 ✅", "ok");
     } catch (e) { toast(`创建失败：${e.message}`, "err"); }
   };
-};
+}
+$("#btn-new").onclick = openNewFlowModal;
+$("#flows-new").onclick = openNewFlowModal;
+$("#btn-flow-back").onclick = returnToFlowList;
 $("#btn-del").onclick = async () => {
   const id = $("#flow-select").value;
   if (!id || !confirm(`确认删除流程「${id}」？`)) return;
   await api(`/api/flows/${encodeURIComponent(id)}`, { method: "DELETE" });
+  state.graph = null; state.sel = null; state.dirty = false;
   await loadFlowList();
-  await loadFlow($("#flow-select").value);
+  switchView("flows-list");
   toast("已生成删除草稿", "ok");
 };
 $("#btn-save").onclick = saveFlow;
@@ -1719,6 +2298,13 @@ const MODEL_FIELDS = {
     ["submit_path", "text", "提交任务路径"], ["poll_path", "text", "轮询路径（{task_id} 占位）"],
     ["interval", "number", "轮询间隔秒"], ["timeout", "number", "总超时秒"],
   ],
+  speech: [
+    ["enabled", "bool", "启用 team-agent 文本转语音（失败时中断成片流程）"],
+    ["base_url", "text", "voice-service 地址（默认 http://127.0.0.1:17863）"],
+    ["token", "text", "Bearer Token（本机回环地址可留空）"],
+    ["voice", "text", "默认音色"], ["speed", "number", "默认语速（0.5–2.0）"],
+    ["timeout", "number", "单段超时秒"],
+  ],
 };
 $("#btn-models").onclick = async () => {
   let cfg;
@@ -1726,7 +2312,7 @@ $("#btn-models").onclick = async () => {
   catch (e) { return toast(`读取模型配置失败：${e.message}`, "err"); }
   const sections = Object.entries(MODEL_FIELDS).map(([group, fields]) => `
     <h3 style="margin:14px 0 4px">${{ llm: "分镜 / 文案 LLM", image: "文生图（关键帧 / 角色设定）",
-      video: "图生视频（镜头片段）" }[group]}</h3>
+      video: "图生视频（镜头片段）", speech: "文本转语音（team-agent voice-service）" }[group]}</h3>
     ${fields.map(([key, widget, label, options]) => widget === "bool"
       ? `<div class="field"><label>${label}
            <input type="checkbox" data-mgroup="${group}" data-mkey="${key}"
@@ -1742,8 +2328,8 @@ $("#btn-models").onclick = async () => {
     ).join("")}`).join("");
   openModal(`
     <h2>模型设置</h2>
-    <div class="palette-note">未启用的类型自动降级为占位素材（流水线仍可跑通）。
-      视频走通用两段式（提交 + 轮询），兼容 OpenAI 风格中转。</div>
+    <div class="palette-note">图片和视频模型未启用时自动生成占位素材。
+      team-agent 文本转语音用于旁白；未启用或调用失败时，配音节点会明确失败。</div>
     ${sections}
     <div class="btn-row"><button id="models-cancel">取消</button>
       <button id="models-save" class="primary">保存</button></div>`);
@@ -1816,19 +2402,123 @@ $("#media-upload-input").onchange = async e => {
 
 /* ================= 视图切换：智能体为核，画布为编排工具 ================= */
 function switchView(mode) {
+  if (mode === "flows") mode = state.graph ? "flows-editor" : "flows-list";
   state.viewMode = mode;
+  const inFlows = mode === "flows-list" || mode === "flows-editor";
   $("#nav-agents").classList.toggle("on", mode === "agents");
-  $("#nav-flows").classList.toggle("on", mode === "flows");
+  $("#nav-flows").classList.toggle("on", inFlows);
   $("#agents-view").classList.toggle("view-hidden", mode !== "agents");
-  $("#topbar").classList.toggle("view-hidden", mode !== "flows");
-  $("#main").classList.toggle("view-hidden", mode !== "flows");
+  $("#flows-view").classList.toggle("view-hidden", mode !== "flows-list");
+  $("#topbar").classList.toggle("view-hidden", mode !== "flows-editor");
+  $("#main").classList.toggle("view-hidden", mode !== "flows-editor");
   if (mode === "agents") renderAgentsHome();
+  else if (mode === "flows-list") renderFlowsHome();
   else requestAnimationFrame(() => {   // 画布从隐藏变为可见后重新适配视口
     updateVisibility(); fitView(); drawMinimap();
   });
 }
 $("#nav-agents").onclick = () => switchView("agents");
-$("#nav-flows").onclick = () => switchView("flows");
+function returnToFlowList() {
+  if (state.viewMode === "flows-editor" && state.dirty
+      && !confirm("当前流程有未保存修改，确认返回工作流列表？")) return;
+  state.graph = null; state.sel = null; state.dirty = false;
+  renderFlowGovernance();
+  switchView("flows-list");
+}
+$("#nav-flows").onclick = returnToFlowList;
+
+async function openFlowEditor(id) {
+  try {
+    await loadFlow(id);
+    switchView("flows-editor");
+  } catch (error) { showApiError(error, "打开流程失败"); }
+}
+
+function renderFlowsHome() {
+  const grid = $("#flows-grid");
+  if (!grid) return;
+  if (!state.flows.length) {
+    grid.innerHTML = '<div class="res-empty">还没有工作流。点击右上「新增工作流」创建第一条流程。</div>';
+    return;
+  }
+  grid.innerHTML = state.flows.map(flow => {
+    const gov = flow._governance || {};
+    const agentCount = (flow.ai_agent_ids || []).length;
+    return `<article class="flow-card" data-fid="${esc(flow.id)}" tabindex="0">
+      <div class="flow-head">
+        <span class="flow-ico">◆</span>
+        <div class="flow-title"><b>${esc(flow.name)}</b>
+          <span class="flow-id">${esc(flow.id)} · v${gov.version || "-"}</span></div>
+        <span class="status-badge" data-status="${esc(gov.status || "published")}">${esc(gov.status || "published")}</span>
+      </div>
+      <div class="flow-meta">
+        <span class="chip">${Number(flow.node_count || 0)} 个节点</span>
+        <span class="chip">${agentCount} 个智能体</span>
+        <span class="chip">${(flow.triggers || []).length} 条触发话术</span>
+      </div>
+      <div class="flow-actions">
+        <button class="primary" data-act="edit">编辑画布</button>
+        ${can("resource.write") && gov.status === "draft" ? '<button data-act="submit">提交审批</button>' : ""}
+        <button data-act="versions">版本</button>
+        ${can("resource.write") ? '<button data-act="del" class="danger">删除</button>' : ""}
+      </div>
+    </article>`;
+  }).join("");
+  $$("#flows-grid .flow-card").forEach(card => {
+    const id = card.dataset.fid;
+    const flow = state.flows.find(item => item.id === id);
+    const edit = () => openFlowEditor(id);
+    card.querySelector('[data-act="edit"]').onclick = edit;
+    card.onclick = event => { if (!event.target.closest("button")) edit(); };
+    card.onkeydown = event => {
+      if ((event.key === "Enter" || event.key === " ") && !event.target.closest("button")) {
+        event.preventDefault(); edit();
+      }
+    };
+    card.querySelector('[data-act="submit"]')?.addEventListener("click", () =>
+      submitResource("flow", id, flow?._governance?.version));
+    card.querySelector('[data-act="versions"]').onclick = () => openVersions("flow", id);
+    card.querySelector('[data-act="del"]')?.addEventListener("click", async () => {
+      if (!confirm(`确认删除流程「${id}」？`)) return;
+      try {
+        await api(`/api/flows/${encodeURIComponent(id)}`, { method: "DELETE" });
+        if (state.graph?.id === id) state.graph = null;
+        await loadFlowList();
+        toast("已生成删除草稿", "ok");
+      } catch (error) { showApiError(error, "删除失败"); }
+    });
+  });
+}
+
+function agentOrchestrationMode(agent) {
+  return agent?.orchestration?.mode
+    || (agent?.runtime === "customer-agent" ? "external_agent"
+      : agent?.flow_id ? "flow" : "react");
+}
+
+function agentModeChip(agent) {
+  const mode = agentOrchestrationMode(agent);
+  if (mode === "external_agent") {
+    const provider = agent?.orchestration?.provider === "customer-agent"
+      || agent?.runtime === "customer-agent" ? "Customer Agent" : "第三方智能体";
+    const model = agent?.orchestration?.selection?.model_id || agent?.profile_id || "";
+    return `↗ ${provider}${model ? ` · ${esc(model)}` : ""}`;
+  }
+  if (mode === "flow") {
+    return `◆ 流程 · ${esc(agent?.orchestration?.flow_id || agent?.flow_id || "未选择")}`;
+  }
+  return "◇ 内置 ReAct";
+}
+
+function agentPendingDelete(agent) {
+  const pending = agent?._governance?.pending_delete;
+  return pending?.action === "delete" ? pending : null;
+}
+
+function deleteStatusLabel(status) {
+  return ({ draft: "删除草稿", pending: "删除待审批", approved: "删除待发布" })[status]
+    || "删除处理中";
+}
 
 function renderAgentsHome() {
   const grid = $("#agents-grid");
@@ -1837,45 +2527,46 @@ function renderAgentsHome() {
     grid.innerHTML = '<div class="res-empty">还没有智能体。点右上「创建智能体」，配对知识库 / 技能 / 工具后即可对话。</div>';
     return;
   }
-  grid.innerHTML = state.aiAgents.map(a => `
-    <div class="agent-card" data-aid="${esc(a.id)}">
+  grid.innerHTML = state.aiAgents.map(a => {
+    const pendingDelete = agentPendingDelete(a);
+    const displayGov = pendingDelete || a._governance || {};
+    return `<div class="agent-card" data-aid="${esc(a.id)}">
       <div class="agent-head">
-        <span class="agent-ico">✨</span>
-        <div class="agent-title">
-          <b>${esc(a.name)}</b>
-          <span class="agent-id">${esc(a.id)} · ${a.flow_id ? "流程编排" : "对话式"} · v${a._governance?.version || "-"}</span>
-        </div>
-        <span class="status-badge" data-status="${esc(a._governance?.status || "published")}">${esc(a._governance?.status || "published")}</span>
+        <div class="agent-title"><b>${esc(a.name)}</b></div>
+        <span class="status-badge" data-status="${esc(displayGov.status || "published")}">${pendingDelete
+          ? esc(deleteStatusLabel(pendingDelete.status)) : esc(displayGov.status || "published")}</span>
       </div>
       <p class="agent-desc">${esc(a.description || "")}</p>
-      <div class="res-tags">${[
-        a.flow_id ? `◆ 流程 · ${esc(a.flow_id)}` : "◇ ReAct",
-        ...(a.kb_ids || []).map(x => `📚 ${esc(x)}`),
-        ...(a.skill_ids || []).map(x => `🛠 ${esc(x)}`),
-        ...(a.tool_ids || []).map(x => `🧰 ${esc(x)}`),
-        ...(a.mcp_servers || []).map(x => `🔌 ${esc(x)}`),
-        a.memory ? "💾 记忆" : ""].filter(Boolean).map(t =>
-        `<span class="chip">${t}</span>`).join("")}</div>
       <div class="agent-actions">
         <button class="primary" data-act="chat">▶ 对话</button>
         ${can("resource.write") ? '<button data-act="edit">编辑</button>' : ""}
-        ${can("resource.write") && a._governance?.status === "draft" ? '<button data-act="submit">提交审批</button>' : ""}
+        ${can("resource.write") && pendingDelete?.status === "draft"
+          ? '<button data-act="submit-delete">提交删除</button>'
+          : can("resource.write") && a._governance?.status === "draft" ? '<button data-act="submit">提交审批</button>' : ""}
         <button data-act="versions">版本</button>
-        ${can("resource.write") ? '<button data-act="del" class="danger">删除</button>' : ""}
+        ${can("resource.write") && !pendingDelete ? '<button data-act="del" class="danger">删除</button>' : ""}
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   $$("#agents-grid .agent-card").forEach(card => {
     const id = card.dataset.aid;
+    const agent = state.aiAgents.find(a => a.id === id);
     card.querySelector('[data-act="chat"]').onclick = () => openAgentChat(id);
     card.querySelector('[data-act="edit"]')?.addEventListener("click", () =>
-      agentEditModal(state.aiAgents.find(a => a.id === id)));
+      agentEditModal(agent));
     card.querySelector('[data-act="submit"]')?.addEventListener("click", () =>
-      submitResource("agent", id, state.aiAgents.find(a => a.id === id)?._governance?.version));
+      submitResource("agent", id, agent?._governance?.version));
+    card.querySelector('[data-act="submit-delete"]')?.addEventListener("click", () =>
+      submitResource("agent", id, agentPendingDelete(agent)?.version));
     card.querySelector('[data-act="versions"]').onclick = () => openVersions("agent", id);
     card.querySelector('[data-act="del"]')?.addEventListener("click", async () => {
       if (!confirm(`确认删除智能体「${id}」？`)) return;
-      await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
-      await loadResources(); toast("已生成删除草稿", "ok");
+      try {
+        const deleted = await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await loadResources();
+        openVersions("agent", id);
+        toast(`删除草稿 v${deleted._governance?.version || "-"} 已创建，请提交审批`, "ok");
+      } catch (error) { showApiError(error, "删除失败"); }
     });
   });
 }
@@ -1888,7 +2579,7 @@ function openAgentChat(id) {
   state.chatTarget = id;
   $("#chatp-name").textContent = a.name;
   const mode = $("#chatp-mode");
-  mode.textContent = a.flow_id ? `流程 · ${a.flow_id}` : "对话式";
+  mode.textContent = agentModeChip(a).replace(/^[↗◆◇]\s*/, "");
   mode.classList.add("on");
   $("#chat-panel").classList.add("open");
   renderChat();
@@ -2231,13 +2922,15 @@ function renderResPanel() {
 function renderResAgents(body) {
   body.innerHTML = `
     <div class="res-actions"><button id="res-agent-new" class="primary">＋ 新建智能体</button></div>
-    ${state.aiAgents.map(a => `
-      <div class="res-card" data-aid="${esc(a.id)}">
+    ${state.aiAgents.map(a => {
+      const pendingDelete = agentPendingDelete(a);
+      return `<div class="res-card" data-aid="${esc(a.id)}">
         <div class="res-title">✨ ${esc(a.name)} <span class="res-desc">${esc(a.id)}</span>
-          <span class="spacer"></span></div>
+          <span class="spacer"></span>${pendingDelete
+            ? `<span class="status-badge" data-status="${esc(pendingDelete.status)}">${esc(deleteStatusLabel(pendingDelete.status))}</span>` : ""}</div>
         <div class="res-desc">${esc(a.description || "")}</div>
         <div class="res-tags">${[
-          a.flow_id ? `◆ 流程编排 · ${esc(a.flow_id)}` : "◇ 对话式 ReAct",
+          agentModeChip(a),
           ...(a.kb_ids || []).map(x => `📚 ${esc(x)}`),
           ...(a.skill_ids || []).map(x => `🛠 ${esc(x)}`),
           ...(a.tool_ids || []).map(x => `🧰 ${esc(x)}`),
@@ -2247,32 +2940,59 @@ function renderResAgents(body) {
         <div class="res-actions">
           <button data-act="edit">编辑</button>
           <button data-act="invoke">▶ 调试运行</button>
-          <button data-act="del" class="danger">删除</button></div>
-      </div>`).join("") || '<div class="res-empty">还没有智能体，点上方新建。</div>'}`;
+          ${pendingDelete?.status === "draft" ? '<button data-act="submit-delete">提交删除</button>' : ""}
+          <button data-act="versions">版本</button>
+          ${pendingDelete ? "" : '<button data-act="del" class="danger">删除</button>'}</div>
+      </div>`;
+    }).join("") || '<div class="res-empty">还没有智能体，点上方新建。</div>'}`;
   $("#res-agent-new").onclick = () => agentEditModal(null);
   $$("#res-body .res-card").forEach(card => {
     const id = card.dataset.aid;
+    const agent = state.aiAgents.find(a => a.id === id);
     card.querySelector('[data-act="edit"]').onclick = () =>
-      agentEditModal(state.aiAgents.find(a => a.id === id));
-    card.querySelector('[data-act="del"]').onclick = async () => {
+      agentEditModal(agent);
+    card.querySelector('[data-act="submit-delete"]')?.addEventListener("click", () =>
+      submitResource("agent", id, agentPendingDelete(agent)?.version));
+    card.querySelector('[data-act="versions"]').onclick = () => openVersions("agent", id);
+    card.querySelector('[data-act="del"]')?.addEventListener("click", async () => {
       if (!confirm(`确认删除智能体「${id}」？`)) return;
-      await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
-      await loadResources(); toast("已删除", "ok");
-    };
+      try {
+        const deleted = await api(`/api/ai-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await loadResources();
+        openVersions("agent", id);
+        toast(`删除草稿 v${deleted._governance?.version || "-"} 已创建，请提交审批`, "ok");
+      } catch (error) { showApiError(error, "删除失败"); }
+    });
     card.querySelector('[data-act="invoke"]').onclick = () => agentInvokeModal(id);
   });
 }
-function agentEditModal(agent) {
+function agentEditModal(agent, options = {}) {
   const isNew = !agent;
   const a = agent || { id: "", name: "", description: "", system: "你是一个得力的智能体。",
+                       runtime: "local", profile_id: "aihub-deepseek",
                        flow_id: "", kb_ids: [], skill_ids: [], tool_ids: [],
                        mcp_servers: [], memory: true, max_steps: 8, rag_top_k: 4 };
+  const orchestration = a.orchestration || {};
+  let mode = orchestration.mode || (a.runtime === "customer-agent" ? "external_agent" : a.flow_id ? "flow" : "react");
+  const connection = orchestration.connection || {};
+  const selection = orchestration.selection || {};
+  const credentialRef = connection.credential_ref || "customer-agent-default";
+  let credentialConfigured = a.credential_configured === true;
+  let catalog = null;
+  let catalogMessage = "尚未拉取 CA 能力目录";
+  const caSelected = {
+    skills: new Set(selection.skill_ids || a.skill_ids || []),
+    tools: new Set(selection.tool_ids || a.tool_ids || []),
+    mcp: new Set(selection.mcp_server_ids || a.mcp_servers || []),
+  };
+  let caModel = selection.model_id || a.profile_id || "aihub-deepseek";
+  let caToolPolicy = selection.tool_policy_id || "";
+  const caMemoryInitial = selection.memory_enabled !== undefined
+    ? selection.memory_enabled : a.memory;
   const checks = (items, sel, attr) => (items || []).map(it =>
     `<label class="res-kv"><input type="checkbox" data-${attr}="${esc(it.id || it.name || it)}"
       ${sel.includes(it.id || it.name || it) ? "checked" : ""} style="width:auto">
       ${esc(it.name || it.id || it)}</label>`).join("");
-  const flowOpts = (state.flows || []).map(f =>
-    `<option value="${esc(f.id)}" ${f.id === a.flow_id ? "selected" : ""}>${esc(f.name)}（${esc(f.id)}）</option>`).join("");
   openModal(`
     <h2>${isNew ? "创建智能体" : `编辑智能体 · ${esc(a.id)}`}</h2>
     <div class="ag-sec">身份</div>
@@ -2283,15 +3003,36 @@ function agentEditModal(agent) {
       <textarea id="ag-system" rows="5">${esc(a.system || "")}</textarea></div>
 
     <div class="ag-sec">编排方式</div>
-    <div class="field"><select id="ag-mode">
-      <option value="" ${!a.flow_id ? "selected" : ""}>对话式 —— ReAct 工具循环，模型自主推理</option>
-      <option value="flow" ${a.flow_id ? "selected" : ""}>流程编排 —— 绑定画布流程作为执行策略</option>
-    </select></div>
-    <div class="field" id="ag-flow-row" ${!a.flow_id ? 'style="display:none"' : ""}>
+    <div class="ag-mode-switch" role="group" aria-label="编排方式">
+      <button type="button" data-ag-mode="react">ReAct</button>
+      <button type="button" data-ag-mode="external_agent">第三方智能体</button>
+      <button type="button" data-ag-mode="flow">流程图</button>
+    </div>
+    <div class="field" id="ag-flow-row" ${mode !== "flow" ? 'style="display:none"' : ""}>
       <label>绑定流程（消息作为 input.message 进入流程）</label>
-      <select id="ag-flow">${flowOpts || '<option value="">（暂无流程）</option>'}</select>
-      <div class="hint">流程里可用「智能体」节点继续组装；嵌套最多 3 层。</div></div>
+      <select id="ag-flow"></select>
+      <div class="hint" id="ag-flow-hint">流程里可用「智能体」节点继续组装。</div></div>
+    <div id="ag-ca-row" ${mode !== "external_agent" ? 'style="display:none"' : ""}>
+      <div class="field"><label>智能体提供方</label>
+        <select id="ag-ca-provider" disabled><option value="customer-agent">Customer Agent</option></select></div>
+      <div class="field"><label>CA 地址</label>
+        <input id="ag-ca-url" value="${esc(connection.base_url || "http://127.0.0.1:3000")}" inputmode="url"></div>
+      <div class="field"><label>访问令牌</label>
+        <div class="ag-inline"><input id="ag-ca-token" type="password" autocomplete="new-password"
+          placeholder="${credentialConfigured ? "已配置，留空保持不变" : "本机无鉴权可留空"}">
+          <button type="button" id="ag-ca-clear-token" title="清除已保存令牌" ${credentialConfigured ? "" : "disabled"}>清除</button></div>
+        <div class="hint" id="ag-ca-credential">${credentialConfigured ? "凭据已配置" : "未保存凭据"}</div></div>
+      <div class="ag-inline ag-catalog-actions">
+        <button type="button" id="ag-ca-refresh" title="从 Customer Agent 拉取能力目录">↻ 拉取配置</button>
+        <span class="hint" id="ag-ca-status">${esc(catalogMessage)}</span></div>
+      <div class="field"><label class="ag-toggle"><input id="ag-ca-include-identity" type="checkbox"
+        ${orchestration.include_identity_instructions ? "checked" : ""}>
+        将名称和描述加入 CA System 提示词</label>
+        <div class="hint">仅影响本次请求的 instructions，不会在 CA 创建或绑定固定智能体。</div></div>
+      <div id="ag-ca-catalog"></div>
+    </div>
 
+    <div id="ag-local-capabilities" ${mode !== "react" ? 'style="display:none"' : ""}>
     <div class="ag-sec">能力配对</div>
     <div class="field"><label>📚 知识库（自动 RAG 检索注入）</label>
       ${checks(state.kbs, a.kb_ids, "agkb") || '<span class="hint">暂无知识库</span>'}
@@ -2310,42 +3051,186 @@ function agentEditModal(agent) {
       <input id="ag-memory" type="checkbox" ${a.memory ? "checked" : ""} style="width:auto"></label>
       <div class="hint">按 agent / 会话作用域自动读写最近对话</div></div>
     <div class="field"><label>工具循环最大步数（对话式）</label>
-      <input id="ag-steps" type="number" value="${a.max_steps || 8}"></div>
+      <input id="ag-steps" type="number" value="${a.max_steps || 8}"></div></div>
     <div class="btn-row"><button id="ag-cancel">取消</button>
       <button id="ag-ok" class="primary">保存</button></div>`);
+  $("#modal").classList.add("agent-editor");
   $("#ag-cancel").onclick = closeModal;
-  $("#ag-mode").onchange = () => {
-    $("#ag-flow-row").style.display = $("#ag-mode").value === "flow" ? "" : "none";
+  const renderCACatalog = () => {
+    const host = $("#ag-ca-catalog");
+    if (!catalog) {
+      host.innerHTML = '<div class="ag-catalog-empty">拉取后选择模型与能力</div>';
+      return;
+    }
+    const capabilityGroup = (key, label, items, selected) => {
+      const known = new Set(items.map(item => item.id));
+      const merged = [...items, ...[...selected].filter(id => !known.has(id)).map(id => ({ id, name: id, stale: true }))];
+      return `<div class="ag-cap-group" data-cap-group="${key}">
+        <div class="ag-cap-head"><b>${label}</b><input data-ca-filter="${key}" placeholder="筛选"></div>
+        <div class="ag-cap-list">${merged.map(item => `<label class="ag-cap-option" data-search="${esc(`${item.name || item.id} ${item.description || ""}`.toLowerCase())}">
+          <input type="checkbox" data-ca-cap="${key}" data-ca-id="${esc(item.id)}" ${selected.has(item.id) ? "checked" : ""}>
+          <span><b title="${esc(item.name || item.id)}">${esc(item.name || item.id)}</b>${item.stale ? '<em>已失效</em>' : ""}
+          ${item.description ? `<small>${esc(item.description)}</small>` : ""}</span></label>`).join("") || '<div class="hint">没有可选项</div>'}</div></div>`;
+    };
+    const models = catalog.models || [];
+    const modelKnown = models.some(item => item.id === caModel);
+    const toolPolicies = catalog.toolPolicies || [];
+    const policyKnown = !caToolPolicy || toolPolicies.some(item => item.id === caToolPolicy);
+    host.innerHTML = `<div class="field"><label>模型</label><select id="ag-ca-model">
+      ${!modelKnown && caModel ? `<option value="${esc(caModel)}">${esc(caModel)}（已失效）</option>` : ""}
+      ${models.map(item => `<option value="${esc(item.id)}" ${item.id === caModel ? "selected" : ""}>${esc(item.name || item.id)} · ${esc(item.provider || "")}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>工具执行策略</label><select id="ag-ca-tool-policy">
+        <option value="">（不使用策略）</option>
+        ${!policyKnown ? `<option value="${esc(caToolPolicy)}" selected>${esc(caToolPolicy)}（已失效）</option>` : ""}
+        ${toolPolicies.map(item => `<option value="${esc(item.id)}" ${item.id === caToolPolicy ? "selected" : ""}>${esc(item.name || item.id)}</option>`).join("")}
+      </select><div class="hint">策略由 Customer Agent 管理；Flow 只保存策略 ID。</div></div>
+      ${capabilityGroup("skills", "Skills", catalog.skills || [], caSelected.skills)}
+      ${capabilityGroup("tools", "Tools", catalog.tools || [], caSelected.tools)}
+      ${capabilityGroup("mcp", "MCP", catalog.mcpServers || [], caSelected.mcp)}
+      <div class="field"><label class="ag-toggle"><input id="ag-ca-memory" type="checkbox"
+        ${caMemoryInitial ? "checked" : ""}
+        ${catalog.features?.memory ? "" : "disabled"}> <span>记忆</span></label></div>`;
+    $("#ag-ca-model").onchange = e => { caModel = e.target.value; };
+    $("#ag-ca-tool-policy").onchange = e => { caToolPolicy = e.target.value; };
+    $$('[data-ca-cap]', host).forEach(input => input.onchange = () => {
+      const set = caSelected[input.dataset.caCap];
+      input.checked ? set.add(input.dataset.caId) : set.delete(input.dataset.caId);
+    });
+    $$('[data-ca-filter]', host).forEach(input => input.oninput = () => {
+      const group = $(`[data-cap-group="${input.dataset.caFilter}"]`, host);
+      const query = input.value.trim().toLowerCase();
+      $$(".ag-cap-option", group).forEach(row => {
+        row.hidden = query && !row.dataset.search.includes(query);
+      });
+    });
+  };
+  renderCACatalog();
+  const renderAgentFlowOptions = () => {
+    const agentId = isNew ? ($("#ag-id")?.value.trim() || "") : a.id;
+    const selected = $("#ag-flow").value || orchestration.flow_id || a.flow_id || "";
+    const flowOptions = (state.flows || []).map(flow => ({
+      flow,
+      reason: dependencyCycleReason("agent", agentId, "flow", flow.id)
+        || (isNew ? plannedAgentCycleReason(options.referencingFlowId, flow.id) : ""),
+    }));
+    $("#ag-flow").innerHTML = flowOptions.length
+      ? `<option value="">（请选择流程）</option>${flowOptions.map(({ flow, reason }) =>
+      `<option value="${esc(flow.id)}" ${flow.id === selected ? "selected" : ""}
+        ${reason ? `disabled title="${esc(reason)}"` : ""}>
+        ${esc(flow.name)}（${esc(flow.id)}）${reason ? " · 会形成循环" : ""}</option>`).join("")}`
+      : '<option value="">（暂无流程）</option>';
+    const blocked = flowOptions.filter(option => option.reason);
+    $("#ag-flow-hint").textContent = blocked.length
+      ? "会通过流程回到当前智能体的选项已禁用，避免直接或间接循环。"
+      : "流程里可用「智能体」节点继续组装。";
+  };
+  renderAgentFlowOptions();
+  $("#ag-id")?.addEventListener("input", renderAgentFlowOptions);
+  const setMode = selected => {
+    mode = selected;
+    $$('[data-ag-mode]').forEach(button => {
+      button.classList.toggle("on", button.dataset.agMode === mode);
+      button.setAttribute("aria-pressed", button.dataset.agMode === mode ? "true" : "false");
+    });
+    $("#ag-flow-row").style.display = mode === "flow" ? "" : "none";
+    $("#ag-ca-row").style.display = mode === "external_agent" ? "" : "none";
+    $("#ag-local-capabilities").style.display = mode === "react" ? "" : "none";
+    if (mode === "flow") renderAgentFlowOptions();
+  };
+  $$('[data-ag-mode]').forEach(button => button.onclick = () => setMode(button.dataset.agMode));
+  setMode(mode);
+  $("#ag-ca-refresh").onclick = async () => {
+    const button = $("#ag-ca-refresh");
+    button.disabled = true; $("#ag-ca-status").textContent = "正在拉取…";
+    try {
+      catalog = await api("/api/ai-agents/external/catalog", { method: "POST", body: {
+        provider: "customer-agent", base_url: $("#ag-ca-url").value.trim(),
+        credential_ref: credentialRef, token: $("#ag-ca-token").value || undefined,
+      }});
+      $("#ag-ca-status").textContent = `已拉取 · ${catalog.models.length} 模型 / ${catalog.skills.length} Skills / ${catalog.tools.length} Tools / ${catalog.mcpServers.length} MCP / ${(catalog.toolPolicies || []).length} 策略`;
+      if (!caModel && catalog.models[0]) caModel = catalog.models[0].id;
+      renderCACatalog();
+    } catch (error) {
+      $("#ag-ca-status").textContent = `拉取失败：${error.message}`;
+    } finally { button.disabled = false; }
+  };
+  $("#ag-ca-clear-token").onclick = async () => {
+    try {
+      await api(`/api/ai-agents/external/credentials/${encodeURIComponent(credentialRef)}`,
+        { method: "PUT", body: { clear: true } });
+      credentialConfigured = false;
+      $("#ag-ca-credential").textContent = "未保存凭据";
+      $("#ag-ca-clear-token").disabled = true;
+      $("#ag-ca-token").placeholder = "本机无鉴权可留空";
+    } catch (error) { toast(`清除凭据失败：${error.message}`, "err"); }
   };
   $("#ag-ok").onclick = async () => {
+    if (mode === "external_agent" && !caModel)
+      return toast("请选择 CA 模型", "err");
+    if (mode === "external_agent" && catalog) {
+      const valid = (items, selected) => [...selected].every(id => items.some(item => item.id === id));
+      if (!catalog.models.some(item => item.id === caModel)
+          || !valid(catalog.skills || [], caSelected.skills)
+          || !valid(catalog.tools || [], caSelected.tools)
+          || !valid(catalog.mcpServers || [], caSelected.mcp)
+          || (caToolPolicy && !(catalog.toolPolicies || []).some(item => item.id === caToolPolicy)))
+        return toast("存在已失效的 CA 能力，请移除或重新选择", "err");
+    }
+    const localSkills = [...$$("#modal [data-agskill]")].filter(c => c.checked).map(c => c.dataset.agskill);
+    const localTools = [...$$("#modal [data-agtool]")].filter(c => c.checked).map(c => c.dataset.agtool);
+    const localMcp = [...$$("#modal [data-agmcp]")].filter(c => c.checked).map(c => c.dataset.agmcp);
+    const caMemory = $("#ag-ca-memory")?.checked === true;
+    const caIncludeIdentity = $("#ag-ca-include-identity")?.checked === true;
     const body = {
       id: isNew ? ($("#ag-id").value.trim() || ($("#ag-name").value.trim()
         .toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || `agent-${Date.now() % 10000}`))
         : a.id,
       name: $("#ag-name").value.trim(), description: $("#ag-desc").value.trim(),
       system: $("#ag-system").value,
-      flow_id: $("#ag-mode").value === "flow" ? ($("#ag-flow").value || "") : "",
-      kb_ids: [...$$("#modal [data-agkb]")].filter(c => c.checked).map(c => c.dataset.agkb),
-      skill_ids: [...$$("#modal [data-agskill]")].filter(c => c.checked).map(c => c.dataset.agskill),
-      tool_ids: [...$$("#modal [data-agtool]")].filter(c => c.checked).map(c => c.dataset.agtool),
-      mcp_servers: [...$$("#modal [data-agmcp]")].filter(c => c.checked).map(c => c.dataset.agmcp),
-      memory: $("#ag-memory").checked,
+      orchestration: mode === "external_agent" ? {
+        mode, provider: "customer-agent", agent_id: orchestration.agent_id || "",
+        include_identity_instructions: caIncludeIdentity,
+        connection: { base_url: $("#ag-ca-url").value.trim(), credential_ref: credentialRef },
+        selection: { model_id: caModel, skill_ids: [...caSelected.skills],
+          tool_ids: [...caSelected.tools], mcp_server_ids: [...caSelected.mcp],
+          memory_enabled: caMemory, tool_policy_id: caToolPolicy },
+      } : mode === "flow" ? { mode, flow_id: $("#ag-flow").value || "" } : { mode },
+      runtime: mode === "external_agent" ? "customer-agent" : "local",
+      profile_id: mode === "external_agent" ? caModel : "aihub-deepseek",
+      flow_id: mode === "flow" ? ($("#ag-flow").value || "") : "",
+      kb_ids: mode === "react" ? [...$$("#modal [data-agkb]")].filter(c => c.checked).map(c => c.dataset.agkb) : [],
+      skill_ids: mode === "external_agent" ? [...caSelected.skills] : mode === "react" ? localSkills : [],
+      tool_ids: mode === "external_agent" ? [...caSelected.tools] : mode === "react" ? localTools : [],
+      mcp_servers: mode === "external_agent" ? [...caSelected.mcp] : mode === "react" ? localMcp : [],
+      memory: mode === "external_agent" ? caMemory : mode === "react" ? $("#ag-memory").checked : false,
       max_steps: Number($("#ag-steps").value) || 8,
       rag_top_k: Number($("#ag-ragk").value) || 4,
     };
     if (body.flow_id && !(state.flows || []).some(f => f.id === body.flow_id))
       return toast("绑定的流程不存在", "err");
     try {
-      await api(isNew ? "/api/ai-agents" : `/api/ai-agents/${encodeURIComponent(a.id)}`,
-                { method: isNew ? "POST" : "PUT", body });
+      const token = $("#ag-ca-token").value.trim();
+      if (mode === "external_agent" && token) {
+        await api(`/api/ai-agents/external/credentials/${encodeURIComponent(credentialRef)}`,
+          { method: "PUT", body: { token } });
+      }
+      const saved = await api(isNew ? "/api/ai-agents" : `/api/ai-agents/${encodeURIComponent(a.id)}`,
+                              { method: isNew ? "POST" : "PUT", body });
       closeModal(); await loadResources(); renderResPanel();
+      options.onSaved?.(state.aiAgents.find(item => item.id === saved.id) || saved);
       toast("智能体已保存 ✅", "ok");
     } catch (e) { toast(`保存失败：${e.message}`, "err"); }
   };
 }
 function agentInvokeModal(agentId) {
+  const agent = state.aiAgents.find(item => item.id === agentId);
+  const external = (agent?.orchestration?.mode || (agent?.runtime === "customer-agent" ? "external_agent" : "react")) === "external_agent";
   openModal(`
     <h2>调试运行 · ${esc(agentId)}</h2>
+    ${external ? `<div class="field"><label>Skill</label><select id="ag-irun-skill"><option value="">自动选择</option>
+      ${(agent.skill_ids || []).map(skill => `<option value="${esc(skill)}">${esc(skill)}</option>`).join("")}
+    </select></div>` : ""}
     <div class="field"><label>输入消息</label>
       <textarea id="ag-msg" rows="3" placeholder="问点什么…"></textarea></div>
     <div class="field"><label>会话 ID（留空=新会话）</label><input id="ag-session"></div>
@@ -2361,7 +3246,9 @@ function agentInvokeModal(agentId) {
     $("#ag-irun-out").textContent = "运行中…";
     try {
       const out = await api(`/api/ai-agents/${encodeURIComponent(agentId)}/invoke`,
-        { method: "POST", body: { message: msg, session_id: $("#ag-session").value.trim() || undefined } });
+        { method: "POST", body: { message: msg,
+          skill_id: $("#ag-irun-skill")?.value || undefined,
+          session_id: $("#ag-session").value.trim() || undefined } });
       $("#ag-irun-out").textContent =
         `【回复】${out.text || "（空）"}\n\n【工具调用 ${out.tool_calls || 0} 次】\n` +
         (out.steps || []).map(s => `· ${s.name}(${JSON.stringify(s.args).slice(0, 80)}) → ${s.result || ""}`).join("\n")
@@ -2651,49 +3538,34 @@ async function renderResMemory(body) {
 /* ================= 运行 ================= */
 $("#btn-run").onclick = async () => {
   if (!state.graph) return;
-  const values = await promptInputs(state.graph);
-  if (values === null) return;
+  const flow = state.graph, scope = runScope();
+  const values = await promptInputs(flow);
+  if (values === null || scope !== runScope()) return;
   closeDrawers();
-  $("#run-status").textContent = "运行中…"; $("#run-status").className = "";
-  try {
-    const run = await api(`/api/flows/${encodeURIComponent(state.graph.id)}/run`,
-      { method: "POST", body: { inputs: values } });
-    $("#run-status").textContent = run.status === "success" ? "成功" : "失败";
-    $("#run-status").className = run.status === "success" ? "ok" : "err";
-    await animateRun(run);
-  } catch (e) {
-    $("#run-status").textContent = "失败"; $("#run-status").className = "err";
-    showApiError(e, "运行失败");
-  }
+  await submitRun(() => api(`/api/flows/${encodeURIComponent(flow.id)}/run`,
+    { method: "POST", body: { inputs: values, background: true } }));
 };
 
 /* ================= 意图触发 ================= */
 async function chat() {
+  if (state.runSubmitting || state.runMonitor.active) return;
   const msg = $("#chat-input").value.trim();
   if (!msg) return;
   $("#chat-input").value = "";
-  closeDrawers();
-  toast("正在理解意图…");
-  try {
-    const r = await api("/api/agent/chat", { method: "POST", body: { message: msg } });
-    if (r.matched && r.run) {
-      if (r.flow_id !== state.graph?.id) {
-        await loadFlowList(r.flow_id);
-        await loadFlow(r.flow_id);
-      }
-      const st = r.run.status === "success" ? "✅" : "❌";
-      $("#run-status").textContent = `${st} ${r.via === "llm" ? "LLM" : "关键词"}路由`;
-      $("#run-status").className = r.run.status === "success" ? "ok" : "err";
-      await animateRun(r.run);
-      $("#rp-title").textContent = `意图触发 · ${r.run.flow_name}`;
-      const ok = r.run.status === "success";
-      toast(`${ok ? "✅" : "❌"} 已触发「${r.run.flow_name}」${r.reply ? "，回复见弹窗" : ""}`,
-            ok ? "ok" : "err");
-      if (r.reply) showReplyModal(r);
-    } else {
-      showReplyModal(r);
-    }
-  } catch (e) { toast(`触发失败：${e.message}`, "err"); }
+  closeDrawers(); toast("正在理解意图…");
+  await submitRun(async () => {
+    const scope = runScope();
+    const result = await api("/api/agent/chat", { method: "POST", body: { message: msg, background: true } });
+    if (scope !== runScope()) return null;
+    if (result.matched && result.run) return result.run;
+    showReplyModal(result); return null;
+  }, { onComplete: run => {
+    const output = run.output;
+    const reply = typeof output === "string" ? output : output?.text || fmtJson(output);
+    toast(`「${run.flow_name}」${RUN_STATUS[run.status] || run.status}`,
+      run.status === "success" ? "ok" : "err");
+    if (reply || run.error) showReplyModal({ matched: true, flow_id: run.flow_id, run, reply: run.error || reply });
+  } });
 }
 function showReplyModal(r) {
   openModal(`
@@ -2706,13 +3578,12 @@ $("#chat-send").onclick = chat;
 $("#chat-input").addEventListener("keydown", e => { if (e.key === "Enter") chat(); });
 
 /* ================= 节点面板（分组） =================
- * 概念模型（对齐 Dify）：知识库 / 记忆 / 技能 是配对给智能体的能力，
- * 在「资源库」中绑定；画布只放控制流 / 动作 / 智能体调用。 */
+ * 知识库 / 记忆 / 技能 / 工具 / MCP 都由智能体配置；
+ * 画布只暴露统一的智能体节点。旧节点类型继续保留，以兼容历史流程。 */
 const PALETTE_GROUPS = [
   ["流程", ["start", "end", "llm", "condition", "intent", "template", "http"]],
-  ["智能体", ["ai_agent", "brain"]],
-  ["动作", ["tool", "mcp", "agent"]],
-  ["视频制作", ["storyboard", "character", "keyframe", "shot_video", "merge_video", "asset"]],
+  ["智能体", ["ai_agent"]],
+  ["视频制作", ["storyboard", "character", "keyframe", "shot_video", "voiceover", "video_compose", "merge_video", "asset"]],
 ];
 const PALETTE_DESC = {
   start: "流程入口与输入变量", end: "流程出口，产出回复",
@@ -2722,7 +3593,8 @@ const PALETTE_DESC = {
   tool: "调用内置工具", mcp: "调用 MCP 服务器的工具",
   agent: "调用本地注册的能力（job_agent 等）",
   storyboard: "剧情 → 分镜表", character: "多方位角色设定图", keyframe: "逐镜生成首帧图",
-  shot_video: "关键帧图生视频", merge_video: "ffmpeg 合成长片", asset: "引用素材库",
+  shot_video: "关键帧图生视频", voiceover: "逐镜生成 WAV 旁白",
+  video_compose: "对齐配音、字幕并输出成片", merge_video: "ffmpeg 合成长片", asset: "引用素材库",
 };
 function renderPalette() {
   $("#palette-list").innerHTML = PALETTE_GROUPS.map(([title, types]) => {
@@ -2752,7 +3624,11 @@ function addNode(type) {
   if (type === "template") defaults.template = "";
   if (type === "intent") defaults.intents = [{ name: "intent_1", description: "", samples: [] }];
   if (type === "character" && !defaults.views) defaults.views = ["正面", "左侧", "右侧", "背面"];
-  if (type === "ai_agent" && state.aiAgents.length) defaults.ai_agent_id = state.aiAgents[0].id;
+  if (type === "ai_agent" && state.aiAgents.length) {
+    const candidate = state.aiAgents.find(agent =>
+      !dependencyCycleReason("flow", state.graph.id, "agent", agent.id));
+    if (candidate) defaults.ai_agent_id = candidate.id;
+  }
   if (type === "skill" && state.skillList.length) defaults.skill_id = state.skillList[0].id;
   if (type === "mcp") {
     const servers = Object.keys(state.mcpCfg.servers || {});
