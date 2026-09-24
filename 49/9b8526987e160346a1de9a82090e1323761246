@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-09-24-homepage-flow-chinese-labels-design.md
+  s_bd20ce99e6a8be::t_96261d1841573d 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "499b8526987e160346a1de9a82090e1323761246",
+  "prompts": {},
+  "sessions": {
+    "s_bd20ce99e6a8be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ce6b-091e-7092-a41f-005b854af272",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
