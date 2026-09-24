@@ -39,6 +39,20 @@ def _lookup(ns: dict, path: str):
     return cur
 
 
+def resolve_path(path: str, ns: dict) -> tuple[bool, object]:
+    """Resolve a namespace path without evaluating code.
+
+    Returns ``(False, None)`` for a missing or invalid path so condition edges
+    can treat missing data as a non-match instead of confusing it with JSON
+    ``null``.
+    """
+    path = str(path or "").strip()
+    if not path or not re.fullmatch(r"[a-zA-Z_][\w]*(?:\.[a-zA-Z_0-9][\w]*)*", path):
+        return False, None
+    value = _lookup(ns, path)
+    return (False, None) if value is _MISSING else (True, value)
+
+
 def _to_str(val) -> str:
     if val is None or val is _MISSING:
         return ""
@@ -231,3 +245,31 @@ def eval_expr(expr: str, ns: dict) -> bool:
                             ast.NamedExpr, ast.Await, ast.Yield)):
             raise ExprError("表达式不允许函数调用/导入")
     return _truthy(_eval_node(tree, ns))
+
+
+def compare_value(actual, operator: str, expected) -> bool:
+    """Evaluate one structured condition without arbitrary code execution."""
+    operator = str(operator or "").strip()
+    if operator == "equals":
+        return actual == expected
+    if operator == "not_equals":
+        return actual != expected
+    if operator in {"contains", "not_contains"}:
+        try:
+            matched = expected in actual
+        except (TypeError, ValueError):
+            return False
+        return matched if operator == "contains" else not matched
+    comparisons = {
+        "greater_than": lambda: actual > expected,
+        "greater_or_equal": lambda: actual >= expected,
+        "less_than": lambda: actual < expected,
+        "less_or_equal": lambda: actual <= expected,
+    }
+    fn = comparisons.get(operator)
+    if fn is None:
+        raise ExprError(f"不支持结构化比较运算符：{operator}")
+    try:
+        return bool(fn())
+    except TypeError as exc:
+        raise ExprError("比较类型不符") from exc

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 def llm_chat(llm_cfg: dict, system: str, user: str,
@@ -25,6 +29,7 @@ def llm_chat(llm_cfg: dict, system: str, user: str,
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
     except Exception:
+        log.exception("LLM 文本调用失败，返回降级结果")
         return None
 
 
@@ -39,6 +44,7 @@ def llm_json(llm_cfg: dict, system: str, user: str) -> dict | None:
         return json.loads(raw.strip().removeprefix("```json")
                           .removesuffix("```").strip())
     except Exception:
+        log.exception("LLM JSON 回复解析失败，返回降级结果")
         return None
 
 
@@ -66,6 +72,7 @@ def llm_messages(llm_cfg: dict, messages: list[dict],
         data = r.json()
         msg = data["choices"][0]["message"]
     except Exception:
+        log.exception("LLM 多轮调用失败，返回降级结果")
         return None
     usage_raw = data.get("usage") or {}
     usage = None

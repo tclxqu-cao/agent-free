@@ -9,14 +9,17 @@ from __future__ import annotations
 import datetime as dt
 import json
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 
-from .graph import FlowGraph, Node
+from .graph import FlowGraph, Node, graph_to_dict
 from . import bridge as bridge_mod
 from .llm import llm_chat
 from .registry import AgentRegistry, AgentAction
-from .template import ExprError, build_namespace, eval_expr, render, render_deep
+from .run_events import capture_node_logs, redact_log
+from .template import (ExprError, build_namespace, compare_value, eval_expr,
+                       render, render_deep, resolve, resolve_path)
 
 MAX_NODE_RUNS = 2      # 单节点最多执行次数（OR-join 再次到达只传播不重跑）
 MAX_STEPS = 1000       # 全流程步数上限（防环兜底）
@@ -30,12 +33,13 @@ class NodeRun:
     status: str = "pending"          # pending/running/success/skipped/failed
     output: dict | None = None
     error: str | None = None
+    traceback: str | None = None
     ms: int = 0
 
     def to_dict(self) -> dict:
         return {"node_id": self.node_id, "type": self.type, "label": self.label,
                 "status": self.status, "output": self.output,
-                "error": self.error, "ms": self.ms}
+                "error": self.error, "traceback": self.traceback, "ms": self.ms}
 
 
 @dataclass
@@ -48,6 +52,8 @@ class RunResult:
     node_runs: list[NodeRun] = field(default_factory=list)
     output: str = ""                 # 最后触达的 end 节点渲染文本
     error: str | None = None
+    traceback: str | None = None
+    graph: dict | None = None
     started_at: str = ""
     finished_at: str = ""
 
@@ -55,7 +61,8 @@ class RunResult:
         return {"run_id": self.run_id, "flow_id": self.flow_id,
                 "flow_name": self.flow_name, "status": self.status,
                 "input": self.input, "node_runs": [n.to_dict() for n in self.node_runs],
-                "output": self.output, "error": self.error,
+                "output": self.output, "error": self.error, "traceback": self.traceback,
+                "graph": self.graph,
                 "started_at": self.started_at, "finished_at": self.finished_at}
 
     def node_run(self, node_id: str) -> NodeRun | None:
@@ -82,12 +89,31 @@ class FlowRunner:
         self.obs = obs              # 可观测性 observer（None = 不上报）
 
     # ---------------------------------------------------------------- 主流程
-    def run(self, graph: FlowGraph, inputs: dict | None = None) -> RunResult:
-        start_time = time.time()
+    def run(self, graph: FlowGraph, inputs: dict | None = None, *,
+            run_id: str | None = None, event_sink=None) -> RunResult:
+        self._event_sink = event_sink
         result = RunResult(
-            run_id=uuid.uuid4().hex[:12], flow_id=graph.id, flow_name=graph.name,
-            input=dict(inputs or {}),
+            run_id=run_id or uuid.uuid4().hex[:12], flow_id=graph.id, flow_name=graph.name,
+            input=dict(inputs or {}), status="running", graph=graph_to_dict(graph),
             started_at=dt.datetime.now().isoformat(timespec="seconds"))
+        self._result = result
+        self._emit("run.started", "流程开始执行")
+        try:
+            self._walk(graph, result)
+        except Exception as exc:
+            result.status = "failed"
+            result.error = redact_log(f"{type(exc).__name__}: {exc}")
+            result.traceback = redact_log(traceback.format_exc())
+        if result.status == "running":
+            result.status = "success"
+        result.finished_at = dt.datetime.now().isoformat(timespec="seconds")
+        self._emit("run.finished", result.error or "流程执行完成",
+                   level="error" if result.status == "failed" else "info",
+                   traceback=result.traceback)
+        self._observe(result)
+        return result
+
+    def _walk(self, graph: FlowGraph, result: RunResult) -> None:
         ns = build_namespace(
             {"today": dt.date.today().isoformat(), "run_id": result.run_id,
              "flow_id": graph.id},
@@ -98,8 +124,7 @@ class FlowRunner:
             result.status = "failed"
             result.error = "缺少开始节点"
             result.finished_at = dt.datetime.now().isoformat(timespec="seconds")
-            self._observe(result)
-            return result
+            return
 
         queue: list[str] = [start_node.id]
         run_counts: dict[str, int] = {}
@@ -133,14 +158,22 @@ class FlowRunner:
             if nrun.status == "failed":
                 result.status = "failed"
                 result.error = f"节点「{node.display_label()}」失败：{nrun.error}"
+                result.traceback = nrun.traceback
                 break
 
             queue.extend(self._next_nodes(graph, node, ns))
 
-        result.finished_at = dt.datetime.now().isoformat(timespec="seconds")
-        result.started_at = result.started_at  # 保留
-        self._observe(result)
-        return result
+    def _emit(self, event_type: str, message: str, node: NodeRun | None = None,
+              level: str = "info", traceback: str | None = None) -> None:
+        sink = getattr(self, "_event_sink", None)
+        if sink is None:
+            return
+        event = {"type": event_type, "level": level, "message": redact_log(message)}
+        if node is not None:
+            event.update(node_id=node.node_id, node_label=node.label)
+        if traceback:
+            event["traceback"] = redact_log(traceback)
+        sink(self._result.to_dict(), event)
 
     def _observe(self, result: RunResult) -> None:
         """可观测性上报（Langfuse 等），任何故障不影响流程结果。"""
@@ -157,6 +190,8 @@ class FlowRunner:
         if not edges:
             return []
         if node.type == "condition":
+            if "outputs" in node.params:
+                return [edges[0]["to"]]
             chosen: list[str] = []
             hit = False
             for e in edges:
@@ -164,7 +199,7 @@ class FlowRunner:
                 if branch.lower() == "else":
                     continue
                 try:
-                    if eval_expr(branch, ns):
+                    if self._condition_matches(node, e, ns):
                         chosen.append(e["to"])
                         hit = True
                         break
@@ -189,11 +224,46 @@ class FlowRunner:
             return []
         return [e["to"] for e in edges]
 
+    @staticmethod
+    def _condition_matches(node: Node, edge: dict, ns: dict) -> bool:
+        operator = str(edge.get("operator") or "").strip()
+        if not operator:
+            return eval_expr(str(edge.get("branch") or ""), ns)
+        found, actual = resolve_path(node.params.get("source") or "input.message", ns)
+        if not found:
+            return False
+        value_type = str(edge.get("value_type") or "string").strip()
+        raw = edge.get("value")
+        if value_type == "string":
+            expected = str(raw if raw is not None else "")
+        elif value_type == "number":
+            try:
+                expected = float(raw)
+                if expected.is_integer():
+                    expected = int(expected)
+            except (TypeError, ValueError) as exc:
+                raise ExprError("比较值不是有效数字") from exc
+        elif value_type == "boolean":
+            if isinstance(raw, bool):
+                expected = raw
+            elif str(raw).strip().lower() in {"true", "1"}:
+                expected = True
+            elif str(raw).strip().lower() in {"false", "0"}:
+                expected = False
+            else:
+                raise ExprError("比较值不是有效布尔值")
+        elif value_type == "null":
+            expected = None
+        else:
+            raise ExprError(f"不支持比较值类型：{value_type}")
+        return compare_value(actual, operator, expected)
+
     # ---------------------------------------------------------------- 节点执行
     def _execute_node(self, node: Node, ns: dict, result: RunResult) -> NodeRun:
         nrun = NodeRun(node_id=node.id, type=node.type, label=node.display_label())
         result.node_runs.append(nrun)
         nrun.status = "running"
+        self._emit("node.started", f"开始：{nrun.label}", nrun)
         t0 = time.time()
         try:
             handler = {
@@ -207,17 +277,32 @@ class FlowRunner:
                 "mcp": self._run_mcp, "tool": self._run_tool,
                 "storyboard": self._run_video_node, "character": self._run_video_node,
                 "keyframe": self._run_video_node, "shot_video": self._run_video_node,
-                "merge_video": self._run_video_node, "asset": self._run_video_node,
+                "merge_video": self._run_video_node, "voiceover": self._run_video_node,
+                "video_compose": self._run_video_node, "asset": self._run_video_node,
             }[node.type]
-            nrun.output = handler(node, ns) or {}
+            def on_log(level, message, trace):
+                nrun.ms = int((time.time() - t0) * 1000)
+                self._emit("node.log", message, nrun, level, trace)
+
+            with capture_node_logs(on_log):
+                nrun.output = handler(node, ns) or {}
             nrun.status = "success"
         except _SkipNode as e:
             nrun.status = "skipped"
-            nrun.output = {"skipped": True, "reason": str(e)}
+            nrun.output = {"skipped": True, "reason": redact_log(str(e))}
+            if e.__context__ is not None or e.__cause__ is not None:
+                nrun.traceback = redact_log(traceback.format_exc())
         except Exception as e:  # noqa: BLE001 节点隔离，错误进 RunResult
             nrun.status = "failed"
-            nrun.error = f"{type(e).__name__}: {e}"
+            nrun.error = redact_log(f"{type(e).__name__}: {e}")
+            nrun.traceback = redact_log(traceback.format_exc())
         nrun.ms = int((time.time() - t0) * 1000)
+        description = {"success": "完成", "failed": "失败", "skipped": "降级"}[nrun.status]
+        detail = nrun.error or (nrun.output or {}).get("reason") or ""
+        self._emit("node.finished", f"{description}：{nrun.label}（{nrun.ms}ms）" +
+                   (f"：{detail}" if detail else ""), nrun,
+                   "error" if nrun.status == "failed" else
+                   "warning" if nrun.status == "skipped" else "info", nrun.traceback)
         return nrun
 
     def _run_start(self, node: Node, ns: dict) -> dict:
@@ -293,15 +378,31 @@ class FlowRunner:
         message = render(node.params.get("message") or "{{input.message}}", ns).strip()
         if not message:
             raise ValueError("智能体节点消息为空")
+        skill_id = render(str(node.params.get("skill_id") or ""), ns).strip()
+        if skill_id and skill_id not in set(agent.get("skill_ids") or []):
+            raise ValueError(f"智能体未绑定技能：{skill_id}")
         session_id = render(str(node.params.get("session_id") or ""), ns).strip()
+        def resolve_context(value):
+            if isinstance(value, str):
+                return resolve(value, ns)
+            if isinstance(value, dict):
+                return {str(key): resolve_context(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [resolve_context(item) for item in value]
+            return value
+        context = resolve_context(node.params.get("context") or {})
+        if not isinstance(context, dict):
+            raise ValueError("智能体节点 context 必须是对象")
         run_id = getattr(self, "_result", None) and self._result.run_id
         out = self.agent_rt.run(agent, message, session_id=session_id or None,
-                                flow_run_id=run_id)
+                                flow_run_id=run_id, skill_id=skill_id or None,
+                                context=context)
         if out.get("error"):
             if node.params.get("required"):
                 raise RuntimeError(f"智能体执行失败：{out['error']}")
             raise _SkipNode(f"智能体执行失败，已降级：{out['error']}")
         return {"text": out.get("text", ""),
+                **({"artifact": out["artifact"]} if isinstance(out.get("artifact"), dict) else {}),
                 "steps": out.get("steps", [])[:20],
                 "tool_calls": out.get("tool_calls", 0),
                 "session_id": out.get("session_id", "")}
@@ -421,7 +522,18 @@ class FlowRunner:
             raise _SkipNode(str(e)) from e
 
     def _run_condition(self, node: Node, ns: dict) -> dict:
-        return {}  # 分支选择在 _next_nodes，节点本身无副作用
+        if "outputs" not in node.params:
+            return {}  # 兼容旧流程：分支选择仍在 _next_nodes
+        for rule in node.params.get("outputs") or []:
+            try:
+                matched = eval_expr(str(rule.get("expression") or ""), ns)
+            except ExprError:
+                matched = False
+            if matched:
+                return {"matched": True, "rule": str(rule.get("name") or ""),
+                        "text": render(str(rule.get("output") or ""), ns)}
+        return {"matched": False, "rule": "default",
+                "text": render(str(node.params.get("default_output") or ""), ns)}
 
     def _run_intent(self, node: Node, ns: dict) -> dict:
         from .intent import classify_intent

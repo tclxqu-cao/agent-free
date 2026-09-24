@@ -18,7 +18,6 @@ from typing import Iterator
 
 SESSION_COOKIE = "flow_studio_session"
 SESSION_HOURS = 12
-PASSWORD_MIN_LENGTH = 10
 ROLES = ("owner", "admin", "editor", "viewer")
 RESOURCE_TYPES = ("agent", "flow")
 
@@ -120,9 +119,8 @@ class Principal:
 
 
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
-    if len(password) < PASSWORD_MIN_LENGTH:
-        raise GovernanceError(
-            "weak_password", f"密码至少需要 {PASSWORD_MIN_LENGTH} 个字符", 422)
+    if not password:
+        raise GovernanceError("invalid_password", "密码不能为空", 422)
     salt = salt or secrets.token_bytes(16)
     n, r, p = 2**14, 8, 1
     digest = hashlib.scrypt(password.encode("utf-8"), salt=salt,

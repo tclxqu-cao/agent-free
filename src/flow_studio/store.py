@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
@@ -83,13 +84,24 @@ class RunStore:
 
     def __init__(self, db_path: Path):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS runs (
             run_id TEXT PRIMARY KEY, flow_id TEXT, flow_name TEXT,
             status TEXT, created_at TEXT, data TEXT)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS run_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, data TEXT NOT NULL)""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS run_events_cursor ON run_events(run_id, seq)")
         self.conn.commit()
 
     def append(self, result_dict: dict) -> None:
+        with self._lock, self.conn:
+            self._save(result_dict)
+
+    def _save(self, result_dict: dict) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?)",
             (result_dict["run_id"], result_dict["flow_id"], result_dict["flow_name"],
@@ -97,19 +109,54 @@ class RunStore:
              result_dict.get("finished_at") or result_dict.get("started_at") or
              dt.datetime.now().isoformat(timespec="seconds"),
              json.dumps(result_dict, ensure_ascii=False)))
-        self.conn.commit()
+
+    def record(self, snapshot: dict, event: dict) -> None:
+        """Commit the incremental snapshot and its event together."""
+        event = {"timestamp": dt.datetime.now().isoformat(timespec="milliseconds"),
+                 **event, "run_id": snapshot["run_id"]}
+        with self._lock, self.conn:
+            self._save(snapshot)
+            self.conn.execute("INSERT INTO run_events(run_id, data) VALUES (?, ?)",
+                              (snapshot["run_id"], json.dumps(event, ensure_ascii=False)))
+
+    def events(self, run_id: str, after: int = 0, limit: int = 200) -> dict:
+        limit = min(max(limit, 1), 500)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT seq, data FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?",
+                (run_id, max(after, 0), limit + 1)).fetchall()
+            events = [{**json.loads(data), "seq": seq} for seq, data in rows[:limit]]
+            return {"events": events, "next_seq": events[-1]["seq"] if events else after,
+                    "has_more": len(rows) > limit, "run": self.get(run_id)}
+
+    def interrupt_pending(self) -> None:
+        """A new runtime cannot resume the previous process's Python call stack."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT data FROM runs WHERE status IN ('queued', 'running')").fetchall()
+            for (data,) in rows:
+                run = json.loads(data)
+                run.update(status="interrupted", error="服务重启，执行已中断",
+                           finished_at=dt.datetime.now().isoformat(timespec="seconds"))
+                for node in run.get("node_runs", []):
+                    if node.get("status") == "running":
+                        node.update(status="failed", error=run["error"])
+                self.record(run, {"type": "run.finished", "level": "error",
+                                  "message": run["error"]})
 
     def list(self, flow_id: str | None = None, limit: int = 30) -> list[dict]:
         sql = ("SELECT run_id, flow_id, flow_name, status, created_at FROM runs "
                + ("WHERE flow_id=? " if flow_id else "")
                + "ORDER BY created_at DESC LIMIT ?")
-        rows = (self.conn.execute(sql, (flow_id, limit)).fetchall() if flow_id
-                else self.conn.execute(sql, (limit,)).fetchall())
+        with self._lock:
+            rows = (self.conn.execute(sql, (flow_id, limit)).fetchall() if flow_id
+                    else self.conn.execute(sql, (limit,)).fetchall())
         return [dict(zip(["run_id", "flow_id", "flow_name", "status", "created_at"],
                          r)) for r in rows]
 
     def get(self, run_id: str) -> dict | None:
-        row = self.conn.execute("SELECT data FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        with self._lock:
+            row = self.conn.execute("SELECT data FROM runs WHERE run_id=?", (run_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def new_run_id(self) -> str:

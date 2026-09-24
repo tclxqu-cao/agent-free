@@ -113,8 +113,16 @@ class PolicyEngine:
                 out.append(PolicyViolation(
                     "cross_workspace_reference",
                     f"引用的资源 {value} 不属于当前 Workspace", key))
-        for key, known_key in (("kb_ids", "kb_ids"), ("skill_ids", "skill_ids"),
-                               ("mcp_servers", "mcp_ids")):
+        external_agent = (
+            (snapshot.get("orchestration") or {}).get("mode") == "external_agent"
+        )
+        local_references = [("kb_ids", "kb_ids")]
+        if not external_agent:
+            local_references.extend((
+                ("skill_ids", "skill_ids"),
+                ("mcp_servers", "mcp_ids"),
+            ))
+        for key, known_key in local_references:
             known = context.get(known_key)
             if known is None:
                 continue

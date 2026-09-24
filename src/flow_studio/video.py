@@ -18,6 +18,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import time
 import zlib
 from pathlib import Path
@@ -46,11 +47,13 @@ DEFAULT_MODELS: dict = {
               "hf_params": {"steps": 4, "negative_prompt": "static, blurry, low quality, distorted",
                             "guidance_scale": 3.5, "guidance_scale_2": 3.5,
                             "quality": 1, "flow_shift": 3, "frame_multiplier": 16}},
+    "speech": {"enabled": True, "base_url": "http://127.0.0.1:17863", "token": "",
+               "voice": "Serena", "speed": 1.0, "timeout": 120},
 }
 
 
 class VideoModels:
-    """三类模型配置（llm / image / video），落盘 data/video_models.json。"""
+    """媒体模型配置（llm / image / video / speech），落盘 video_models.json。"""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -570,3 +573,214 @@ def concat_videos(clips: list[dict], out_path: Path,
     w, h = ASPECTS[ratio]
     return {"path": str(out_path), "duration": round(probe_duration(out_path), 2),
             "count": len(clips), "aspect_ratio": ratio, "size": f"{w}x{h}"}
+
+
+def _srt_timestamp(seconds: float) -> str:
+    total_ms = max(0, round(seconds * 1000))
+    hours, rest = divmod(total_ms, 3_600_000)
+    minutes, rest = divmod(rest, 60_000)
+    secs, millis = divmod(rest, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _write_srt(entries: list[dict], durations: list[float], path: Path) -> None:
+    cursor = 0.0
+    blocks = []
+    for position, (entry, duration) in enumerate(zip(entries, durations), start=1):
+        text = re.sub(r"[\r\n]+", " ", str(entry.get("text") or "")).strip()
+        if not text:
+            raise ValueError(f"第 {position} 段字幕为空")
+        end = cursor + duration
+        blocks.append(
+            f"{position}\n{_srt_timestamp(cursor)} --> {_srt_timestamp(end)}\n{text}\n")
+        cursor = end
+    path.write_text("\n".join(blocks), encoding="utf-8")
+
+
+def _require_ffmpeg(result: subprocess.CompletedProcess, action: str) -> None:
+    if result.returncode == 0:
+        return
+    stderr = result.stderr.decode("utf-8", "ignore")[-800:]
+    raise RuntimeError(f"ffmpeg {action}失败：{stderr}")
+
+
+def _platform_subtitle_font_candidates(platform: str | None = None) -> list[tuple[str, Path]]:
+    """Return CJK-capable subtitle fonts in platform preference order."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return [
+            ("Heiti SC", Path("/System/Library/Fonts/STHeiti Medium.ttc")),
+            ("Hiragino Sans GB", Path("/System/Library/Fonts/Hiragino Sans GB.ttc")),
+            ("Arial Unicode MS", Path("/Library/Fonts/Arial Unicode.ttf")),
+            ("Arial Unicode MS", Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")),
+        ]
+    if platform.startswith("win"):
+        font_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        return [
+            ("Microsoft YaHei", font_dir / "msyh.ttc"),
+            ("Microsoft YaHei", font_dir / "msyh.ttf"),
+            ("SimHei", font_dir / "simhei.ttf"),
+        ]
+    return [
+        ("Noto Sans CJK SC", Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")),
+        ("Noto Sans CJK SC", Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc")),
+        ("Source Han Sans SC", Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf")),
+        ("WenQuanYi Zen Hei", Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")),
+    ]
+
+
+def _fontconfig_subtitle_font(families: list[str]) -> tuple[str, Path] | None:
+    """Resolve distro-specific font paths without accepting fontconfig fallbacks."""
+    fc_match = shutil.which("fc-match")
+    if not fc_match:
+        return None
+    for family in families:
+        try:
+            result = _run(
+                [fc_match, "--format", "%{family}\n%{file}\n", family], timeout=5)
+            lines = result.stdout.decode("utf-8", "ignore").splitlines()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if (result.returncode == 0 and len(lines) >= 2
+                and family.casefold() in lines[0].casefold()):
+            font_file = Path(lines[1].strip())
+            if font_file.is_file():
+                return family, font_file.parent
+    return None
+
+
+def _select_subtitle_font() -> tuple[str, Path]:
+    candidates = _platform_subtitle_font_candidates()
+    for family, font_file in candidates:
+        if font_file.is_file():
+            return family, font_file.parent
+    matched = _fontconfig_subtitle_font([family for family, _ in candidates])
+    if matched:
+        return matched
+    raise RuntimeError(
+        "未找到可烧录中文字幕的字体。macOS 需要 Heiti SC，Linux 需要 "
+        "Noto Sans CJK SC，Windows 需要 Microsoft YaHei")
+
+
+def _escape_subtitle_filter_value(value: str | Path) -> str:
+    # ffmpeg filtergraph treats these characters specially even when argv bypasses a shell.
+    escaped = str(value).replace("\\", "\\\\").replace(":", "\\:")
+    escaped = escaped.replace("'", "\\'").replace(",", "\\,")
+    return escaped.replace("[", "\\[").replace("]", "\\]")
+
+
+def _subtitle_filter(path: Path) -> str:
+    font_name, font_dir = _select_subtitle_font()
+    escaped_path = _escape_subtitle_filter_value(path)
+    escaped_font_dir = _escape_subtitle_filter_value(font_dir)
+    style = (f"FontName={font_name},FontSize=22,Outline=2,Shadow=0,"
+             "MarginV=24,Alignment=2")
+    return (f"subtitles=filename='{escaped_path}':fontsdir='{escaped_font_dir}':"
+            f"force_style='{style}'")
+
+
+def compose_narrated_video(clips: list[dict], voiceovers: list[dict],
+                           subtitles: list[dict], out_path: Path, srt_path: Path,
+                           *, audio_path: Path | None = None,
+                           burn_subtitles: bool = True) -> dict:
+    """Align clips and narration, then produce MP4, continuous WAV, and SRT.
+
+    Inputs must already be ordered and contain absolute ``path`` values. Each segment is
+    normalized to H.264/AAC; its target duration is the longer of the source video and
+    narration plus a 350 ms breathing gap.
+    """
+    import tempfile
+
+    if not has_ffmpeg():
+        raise RuntimeError("ffmpeg 不可用，无法合成配音视频")
+    if not clips or len(clips) != len(voiceovers) or len(clips) != len(subtitles):
+        raise ValueError("镜头、配音与字幕数量必须一致且不能为空")
+
+    ratios = {str(c.get("aspect_ratio") or DEFAULT_ASPECT) for c in clips}
+    if len(ratios) != 1:
+        raise ValueError(f"片段比例不一致：{'、'.join(sorted(ratios))}")
+    ratio = _norm_aspect(next(iter(ratios)))
+    width, height = ASPECTS[ratio]
+    out_path = Path(out_path).resolve()
+    srt_path = Path(srt_path).resolve()
+    audio_path = Path(audio_path or out_path.with_suffix(".wav")).resolve()
+    for target in (out_path, srt_path, audio_path):
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+    durations: list[float] = []
+    for position, (clip, track) in enumerate(zip(clips, voiceovers), start=1):
+        video_file = Path(str(clip.get("path") or ""))
+        audio_file = Path(str(track.get("path") or ""))
+        if not video_file.is_file():
+            raise ValueError(f"第 {position} 个镜头文件不存在")
+        if not audio_file.is_file():
+            raise ValueError(f"第 {position} 个配音文件不存在")
+        video_duration = probe_duration(video_file) or float(clip.get("duration") or 0)
+        voice_duration = probe_duration(audio_file) or float(track.get("duration") or 0)
+        if video_duration <= 0 or voice_duration <= 0:
+            raise ValueError(f"第 {position} 段媒体时长无效")
+        durations.append(round(max(video_duration, voice_duration + 0.35), 3))
+
+    with tempfile.TemporaryDirectory(prefix="flow-compose-") as temp_name:
+        temp = Path(temp_name)
+        temp_srt = temp / "captions.srt"
+        _write_srt(subtitles, durations, temp_srt)
+        segments = []
+        for position, (clip, track, target_duration) in enumerate(
+                zip(clips, voiceovers, durations), start=1):
+            segment = temp / f"segment-{position:03d}.mp4"
+            video_filter = (
+                f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps=24,setsar=1,tpad=stop_mode=clone:stop_duration={target_duration:.3f},"
+                f"trim=duration={target_duration:.3f},setpts=PTS-STARTPTS[v]")
+            audio_filter = (
+                f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"apad=pad_dur={target_duration:.3f},atrim=duration={target_duration:.3f},"
+                "asetpts=PTS-STARTPTS[a]")
+            result = _run([
+                "ffmpeg", "-v", "error", "-y", "-i", str(clip["path"]),
+                "-i", str(track["path"]), "-filter_complex",
+                f"{video_filter};{audio_filter}", "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "160k", "-t", f"{target_duration:.3f}",
+                "-movflags", "+faststart", str(segment)], timeout=600)
+            _require_ffmpeg(result, f"标准化第 {position} 段")
+            segments.append(segment)
+
+        concat_file = temp / "segments.txt"
+        concat_file.write_text(
+            "".join(f"file '{segment}'\n" for segment in segments), encoding="utf-8")
+        joined = temp / "joined.mp4"
+        result = _run([
+            "ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_file), "-c", "copy", "-movflags", "+faststart",
+            str(joined)], timeout=600)
+        _require_ffmpeg(result, "拼接音视频")
+
+        if burn_subtitles:
+            result = _run([
+                "ffmpeg", "-v", "error", "-y", "-i", str(joined),
+                "-vf", _subtitle_filter(temp_srt), "-c:v", "libx264", "-preset", "veryfast",
+                "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
+                str(out_path)], timeout=600)
+            _require_ffmpeg(result, "烧录字幕")
+        else:
+            shutil.copyfile(joined, out_path)
+
+        result = _run([
+            "ffmpeg", "-v", "error", "-y", "-i", str(out_path), "-vn",
+            "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", str(audio_path)],
+            timeout=600)
+        _require_ffmpeg(result, "导出连续 WAV")
+        shutil.copyfile(temp_srt, srt_path)
+
+    final_duration = probe_duration(out_path)
+    if final_duration <= 0 or not audio_path.is_file() or not srt_path.is_file():
+        raise RuntimeError("成片产物校验失败")
+    return {
+        "path": str(out_path), "audio_path": str(audio_path), "srt_path": str(srt_path),
+        "duration": round(final_duration, 2), "count": len(clips),
+        "aspect_ratio": ratio, "size": f"{width}x{height}",
+        "segment_durations": durations, "burn_subtitles": bool(burn_subtitles),
+    }

@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
+import logging
 import shutil
 import threading
+import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .agentrt import DEFAULT_AGENTS, AgentRuntime, AgentStore
 from .assets import AssetStore
 from .builtin_flows import builtin_flows
-from .engine import FlowRunner
+from .engine import FlowRunner, RunResult
+from .external_agent import ExternalAgentCredentialStore
 from .evals import DEFAULT_EVAL_SUITE, EvalStore, TargetRunner
 from .graph import FlowGraph, graph_from_dict, graph_to_dict, start_inputs
 from .intent import route
@@ -18,10 +24,20 @@ from .knowledge import KBStore
 from .mcp_client import MCPManager
 from .memory import MemoryStore
 from .registry import AgentRegistry
+from .run_events import redact_log
 from .skills import DEFAULT_SKILLS, SkillStore
 from .store import FlowStore, RunStore
 from .tools import ToolRegistry, register_builtin_tools
 from .video import VideoModels
+
+
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="flow-run")
+_run_slots = threading.BoundedSemaphore(16)
+log = logging.getLogger(__name__)
+
+
+class RunQueueFull(Exception):
+    pass
 
 
 class WorkspaceRuntime:
@@ -40,6 +56,7 @@ class WorkspaceRuntime:
 
         self.flows = FlowStore(self.root / "flows")
         self.runs = RunStore(self.root / "flows" / "runs.sqlite")
+        self.runs.interrupt_pending()
         self.media = AssetStore(self.root / "media")
         self.vmodels = VideoModels(self.root / "video_models.json")
         self.kb = KBStore(self.root / "kb")
@@ -51,10 +68,14 @@ class WorkspaceRuntime:
         register_builtin_tools(self.tools, kb=self.kb, memory=self.memory,
                                skills=self.skills)
         self.ai_agents = AgentStore(self.root / "ai_agents")
-        self.ai_agents.seed_if_empty(DEFAULT_AGENTS)
+        self.ai_agents.seed_missing(DEFAULT_AGENTS)
+        self.external_credentials = ExternalAgentCredentialStore(
+            self.root / "external_agent_credentials.json")
         self.agent_rt = AgentRuntime(
             self.llm_cfg, self.tools, skills=self.skills, memory=self.memory,
-            kb=self.kb, mcp=self.mcp, obs=self.obs, flow_invoker=self._invoke_flow)
+            kb=self.kb, mcp=self.mcp, obs=self.obs, flow_invoker=self._invoke_flow,
+            bridge_cfg=self.bridge_cfg,
+            credential_resolver=self.external_credentials.resolve)
         self.evals = EvalStore(self.root / "evals")
         self.evals.seed_if_empty(DEFAULT_EVAL_SUITE)
         self.eval_runner = TargetRunner(
@@ -87,11 +108,55 @@ class WorkspaceRuntime:
         key = declared[0] if declared else "message"
         return self.run_flow(graph, {key: question, "message": question})
 
-    def run_flow(self, flow: FlowGraph, inputs: dict | None = None) -> dict:
-        result = self.runner().run(flow, inputs)
+    def run_flow(self, flow: FlowGraph, inputs: dict | None = None, *,
+                 run_id: str | None = None, metadata: dict | None = None) -> dict:
+        def record(snapshot, event):
+            self.runs.record({**snapshot, **(metadata or {})}, event)
+
+        result = self.runner().run(flow, inputs, run_id=run_id, event_sink=record)
         data = result.to_dict()
+        data.update(metadata or {})
         self.runs.append(data)
         return data
+
+    def start_flow(self, flow: FlowGraph, inputs: dict | None = None,
+                   on_complete=None, metadata: dict | None = None) -> dict:
+        if not _run_slots.acquire(blocking=False):
+            raise RunQueueFull("运行队列已满，请稍后再试")
+        queued = RunResult(
+            run_id=uuid.uuid4().hex[:12], flow_id=flow.id, flow_name=flow.name,
+            status="queued", input=dict(inputs or {}), graph=graph_to_dict(flow),
+            started_at=dt.datetime.now().isoformat(timespec="seconds")).to_dict()
+        queued.update(metadata or {})
+
+        def execute():
+            try:
+                try:
+                    result = self.run_flow(flow, inputs, run_id=queued["run_id"], metadata=metadata)
+                except Exception as exc:
+                    result = self.runs.get(queued["run_id"]) or dict(queued)
+                    result.update(status="failed", error=redact_log(f"{type(exc).__name__}: {exc}"),
+                                  traceback=redact_log(traceback.format_exc()),
+                                  finished_at=dt.datetime.now().isoformat(timespec="seconds"))
+                    self.runs.record(result, {"type": "run.finished", "level": "error",
+                                             "message": result["error"],
+                                             "traceback": result["traceback"]})
+                if on_complete:
+                    try:
+                        on_complete(result)
+                    except Exception:
+                        log.exception("运行 %s 完成审计写入失败", queued["run_id"])
+            finally:
+                _run_slots.release()
+
+        try:
+            self.runs.record(queued, {"type": "run.queued", "level": "info",
+                                      "message": "流程已加入执行队列"})
+            _executor.submit(execute)
+        except Exception:
+            _run_slots.release()
+            raise
+        return queued
 
     def chat(self, message: str) -> dict:
         graphs = self.flows.list()
@@ -112,6 +177,7 @@ class WorkspaceManager:
     LEGACY_ITEMS = (
         "flows", "ai_agents", "kb", "skills", "evals", "media",
         "memory.sqlite", "mcp.json", "video_models.json",
+        "external_agent_credentials.json",
     )
 
     def __init__(self, data_root: Path, config: dict, registry: AgentRegistry,

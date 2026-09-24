@@ -283,6 +283,164 @@ def test_ai_agent_node_in_flow(tools, memory, agent_store):
     assert run.output == "收到：{{不解析模板}}（0 次工具）"
 
 
+def test_customer_agent_node_uses_explicit_skill_profile_and_context(
+        tools, agent_store):
+    agent = agent_store.save({
+        "id": "public-content", "name": "公开内容",
+        "runtime": "customer-agent", "ca_profile_id": "legacy-profile",
+        "skill_ids": ["portfolio-works"], "memory": False,
+    })
+    assert agent["profile_id"] == "legacy-profile"
+    assert "ca_profile_id" not in agent
+    captured = {}
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, message, **kwargs):
+            captured.update(message=message, **kwargs)
+            skill = kwargs["selection"]["activatedSkillIds"][0]
+            artifact = {"schemaVersion": 1, "skill": skill, "title": "Works",
+                    "blocks": [{"type": "text", "text": "ok"}]}
+            return {"text": json.dumps(artifact), "tool_calls": 0,
+                    "session_id": "ca-session-1", "run_id": "ca-run-1"}
+
+    rt = AgentRuntime({}, tools, provider_factory=FakeProvider)
+
+    graph = _g([
+        _node("start", "start", inputs=[{"key": "message"}, {"key": "snapshot"}]),
+        _node("content", "ai_agent", ai_agent_id="public-content",
+              skill_id="portfolio-works", message="{{input.message}}",
+              context={"jobSnapshot": "{{input.snapshot}}"}, required=True),
+        _node("end", "end", output="{{content.artifact}}"),
+    ], [{"from": "start", "to": "content"}, {"from": "content", "to": "end"}])
+    run = FlowRunner(ai_agents=agent_store, agent_rt=rt).run(
+        graph, {"message": "show projects", "snapshot": {"count": 2}})
+    assert run.status == "success"
+    assert captured["message"] == "show projects"
+    assert captured["instructions"] == "你是一个得力的智能体。"
+    assert captured["agent_id"] == ""
+    assert captured["selection"]["modelId"] == "legacy-profile"
+    assert captured["selection"]["activatedSkillIds"] == ["portfolio-works"]
+    assert captured["context"]["jobSnapshot"] == {"count": 2}
+    assert captured["context"]["agentId"] == "public-content"
+    assert captured["context"]["flowRunId"] == run.run_id
+    assert run.node_run("content").output["session_id"] == "ca-session-1"
+
+
+def test_external_agent_protocol_passes_selected_capabilities(tools, agent_store):
+    agent = agent_store.save({
+        "id": "ca-jobs", "name": "岗位助手",
+        "description": "根据公开数据回答岗位问题",
+        "system": "只返回已验证数据。",
+        "orchestration": {
+            "mode": "external_agent", "provider": "customer-agent",
+            "include_identity_instructions": True,
+            "connection": {"base_url": "http://127.0.0.1:3000",
+                           "credential_ref": "ca-test"},
+            "selection": {"model_id": "profile-1",
+                          "skill_ids": ["job-hunt"],
+                          "tool_ids": ["read_file"],
+                          "mcp_server_ids": ["browser"],
+                          "memory_enabled": True,
+                          "tool_policy_id": "local-readonly"},
+        },
+    })
+    captured = {}
+
+    class FakeProvider:
+        def __init__(self, base_url, token, timeout):
+            captured.update(base_url=base_url, token=token, timeout=timeout)
+
+        def run(self, message, **kwargs):
+            captured.update(message=message, **kwargs)
+            kwargs["on_event"]("tool.started", {"name": "read_file",
+                                                   "arguments": {"path": "x"}})
+            kwargs["on_event"]("tool.completed", {"content": "ok",
+                                                     "isError": False})
+            return {"text": "matched jobs", "run_id": "r1",
+                    "session_id": "s1", "tool_calls": 1}
+
+    rt = AgentRuntime({}, tools, credential_resolver=lambda ref: f"token:{ref}",
+                      provider_factory=FakeProvider)
+    out = rt.run(agent, "find jobs", session_id="flow-session",
+                 skill_id="job-hunt", context={"location": "Suzhou"})
+    assert out["text"] == "matched jobs" and out["mode"] == "customer-agent"
+    assert captured["base_url"] == "http://127.0.0.1:3000"
+    assert captured["token"] == "token:ca-test"
+    assert captured["instructions"] == (
+        "智能体名称：岗位助手\n\n"
+        "智能体描述：根据公开数据回答岗位问题\n\n"
+        "System 提示词：\n只返回已验证数据。")
+    assert captured["agent_id"] == ""
+    assert agent["orchestration"]["include_identity_instructions"] is True
+    assert captured["session_id"] == "flow-session"
+    assert captured["selection"] == {
+        "modelId": "profile-1", "skillIds": ["job-hunt"],
+        "activatedSkillIds": ["job-hunt"], "toolIds": ["read_file"],
+        "mcpServerIds": ["browser"], "memoryEnabled": True,
+        "toolPolicyId": "local-readonly",
+    }
+    assert out["steps"][0]["name"] == "read_file"
+
+
+def test_agent_orchestration_modes_are_normalized(agent_store):
+    react = agent_store.save({"id": "r", "name": "R"})
+    flow = agent_store.save({"id": "f", "name": "F",
+                             "orchestration": {"mode": "flow",
+                                               "flow_id": "job-hunt-demo"}})
+    assert react["orchestration"] == {"mode": "react"}
+    assert flow["orchestration"] == {"mode": "flow",
+                                     "flow_id": "job-hunt-demo"}
+    with pytest.raises(ValueError, match="必须选择流程"):
+        agent_store.save({"id": "bad", "name": "Bad",
+                          "orchestration": {"mode": "flow"}})
+
+
+def test_default_agents_are_loaded_from_config_without_ca_agent_ids():
+    from flow_studio.agent_defaults import load_default_agents
+
+    defaults = load_default_agents()
+    external = [item for item in defaults
+                if (item.get("orchestration") or {}).get("mode") == "external_agent"]
+    assert {item["id"] for item in external} == {"homepage-agent"}
+    assert {item["id"]: item["name"] for item in external} == {
+        "homepage-agent": "小熊",
+    }
+    assert all(not item["orchestration"].get("agent_id") for item in external)
+
+
+def test_legacy_external_agent_is_migrated_to_configured_protocol(agent_store):
+    from flow_studio.agentrt import DEFAULT_AGENTS
+
+    agent_store._path("homepage-agent").write_text(json.dumps({
+        "id": "homepage-agent", "name": "Edited name",
+        "system": "Edited instructions", "runtime": "customer-agent",
+        "profile_id": "custom-profile", "skill_ids": ["portfolio-help"],
+        "tool_ids": [], "mcp_servers": [], "memory": False,
+    }), encoding="utf-8")
+    assert agent_store.seed_missing(DEFAULT_AGENTS) == 1
+    saved = agent_store.get("homepage-agent")
+    assert saved["name"] == "Edited name"
+    assert saved["system"] == "Edited instructions"
+    assert saved["orchestration"] == {
+        "mode": "external_agent", "provider": "customer-agent", "agent_id": "",
+        "include_identity_instructions": False,
+        "connection": {"base_url": "http://127.0.0.1:3000",
+                       "credential_ref": "customer-agent-default"},
+        "selection": {"model_id": "custom-profile",
+                      "skill_ids": ["portfolio-help"],
+                      "tool_ids": ["skill_load", "bash", "read_file",
+                                   "grep", "glob"],
+                      "mcp_server_ids": [], "memory_enabled": False,
+                      "tool_policy_id": "local-readonly"},
+    }
+    first_updated = saved["updated_at"]
+    assert agent_store.seed_missing(DEFAULT_AGENTS) == 0
+    assert agent_store.get("homepage-agent")["updated_at"] == first_updated
+
+
 def test_ai_agent_llm_unavailable_degrades(tools, agent_store):
     agent = agent_store.save({"id": "noop", "name": "空转"})
     rt = AgentRuntime({}, tools, llm_fn=lambda cfg, msgs, t: None)  # LLM 不可用

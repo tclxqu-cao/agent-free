@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .dependencies import describe_cycle, find_cycle_involving, resource_key
 from .governance import GovernanceError, Principal
 from .graph import graph_from_dict
 from .policy import PolicyEngine, PolicyResult
@@ -57,6 +58,32 @@ class VersionService:
             stage, resource_type, snapshot,
             self._context(workspace_id, resource_type, resource_id, version))
 
+    def _validate_dependencies(self, principal: Principal, resource_type: str,
+                               resource_id: str, snapshot: dict | None,
+                               action: str = "upsert") -> None:
+        if resource_type not in ("agent", "flow"):
+            return
+        resources = {}
+        for kind in ("agent", "flow"):
+            for version in self.list_effective(principal, kind):
+                if version.get("snapshot"):
+                    resources[resource_key(kind, version["resource_id"])] = version["snapshot"]
+        focus = resource_key(resource_type, resource_id)
+        if action == "delete" or snapshot is None:
+            resources.pop(focus, None)
+            return
+        resources[focus] = snapshot
+        cycle = find_cycle_involving(resources, focus)
+        if not cycle:
+            return
+        path, details = describe_cycle(cycle, resources)
+        raise GovernanceError(
+            "dependency_cycle",
+            f"不能保存循环引用：{path}",
+            409,
+            {"cycle": details, "path": path},
+        )
+
     def save_draft(self, principal: Principal, resource_type: str,
                    resource_id: str, snapshot: dict | None,
                    action: str = "upsert") -> dict:
@@ -67,6 +94,8 @@ class VersionService:
             snapshot["id"] = resource_id
             if resource_type == "flow":
                 graph_from_dict(snapshot)
+        self._validate_dependencies(
+            principal, resource_type, resource_id, snapshot, action)
         version = self.governance.save_version(
             principal.workspace_id, resource_type, resource_id,
             snapshot, action, principal.user_id)
@@ -77,6 +106,9 @@ class VersionService:
     def submit(self, principal: Principal, resource_type: str,
                resource_id: str, version_no: int, reason: str = "") -> dict:
         version = self._version(principal, resource_type, resource_id, version_no)
+        self._validate_dependencies(
+            principal, resource_type, resource_id, version.get("snapshot"),
+            version.get("action") or "upsert")
         result = self.evaluate(principal.workspace_id, "submit", resource_type,
                                resource_id, version.get("snapshot"), version)
         self._raise_policy(result)
@@ -116,6 +148,9 @@ class VersionService:
     def publish(self, principal: Principal, resource_type: str,
                 resource_id: str, version_no: int, reason: str = "") -> dict:
         version = self._version(principal, resource_type, resource_id, version_no)
+        self._validate_dependencies(
+            principal, resource_type, resource_id, version.get("snapshot"),
+            version.get("action") or "upsert")
         result = self.evaluate(principal.workspace_id, "publish", resource_type,
                                resource_id, version.get("snapshot"), version)
         self._raise_policy(result)
@@ -147,6 +182,9 @@ class VersionService:
         source = self._version(principal, resource_type, resource_id, version_no)
         if not source.get("published_at"):
             raise GovernanceError("rollback_source_invalid", "只能回滚到历史发布版本", 409)
+        self._validate_dependencies(
+            principal, resource_type, resource_id, source.get("snapshot"),
+            source.get("action") or "upsert")
         self._raise_policy(self.evaluate(
             principal.workspace_id, "publish", resource_type, resource_id,
             source.get("snapshot"), source))
@@ -195,6 +233,11 @@ class VersionService:
                 principal.workspace_id, resource_type, resource_id)
             if latest and latest.get("action") != "delete":
                 return latest
+            if latest and latest.get("status") in ("draft", "pending", "approved"):
+                release = self.governance.get_release(
+                    principal.workspace_id, resource_type, resource_id)
+                if release and release.get("action") != "delete":
+                    return {**release, "pending_delete": self.decorate(latest)}
         release = self.governance.get_release(
             principal.workspace_id, resource_type, resource_id)
         return release if release and release.get("action") != "delete" else None

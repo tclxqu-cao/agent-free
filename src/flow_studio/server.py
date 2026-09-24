@@ -15,6 +15,7 @@ from pathlib import Path
 from .adapters import register_job_agent
 from .agentrt import normalize_agent
 from .evals import EvalStore, TargetRunner, compare_runs, run_suite
+from .external_agent import CustomerAgentProvider, ExternalAgentError
 from .graph import NODE_TYPES, FlowGraph, graph_from_dict, graph_to_dict, start_inputs
 from .governance import (SESSION_COOKIE, GovernanceError, GovernanceStore,
                          Principal, ROLE_CAPABILITIES)
@@ -26,7 +27,8 @@ from .policy import PolicyEngine
 from .registry import AgentRegistry
 from .template import build_namespace, render
 from .versioning import VersionService
-from .workspace import WorkspaceManager
+from .workspace import WorkspaceManager, RunQueueFull
+from .homepage import HomepageService
 
 log = logging.getLogger("flow_studio")
 
@@ -54,6 +56,7 @@ class Studio:
             self.data_root, cfg, self.registry, self.obs, self.governance)
         self.policy = PolicyEngine()
         self.versions = VersionService(self.governance, self.workspaces, self.policy)
+        self.homepage = HomepageService(self)
 
     def _load_config(self) -> dict:
         import yaml
@@ -92,6 +95,8 @@ def _required_capability(method: str, path: str) -> str | None:
         return "workspace.manage"
     if path.startswith("/api/governance/audit"):
         return "audit.read"
+    if path == "/api/ai-agents/external/catalog":
+        return "resource.read"
     if path == "/api/governance/policy" and method != "GET":
         return "policy.manage"
     if path.startswith("/api/governance/resources/"):
@@ -129,19 +134,56 @@ def _version_payload(version: dict) -> dict:
         "published_version": version.get("published_version"),
         "created_by": version.get("created_by"),
     }
+    pending_delete = version.get("pending_delete")
+    if isinstance(pending_delete, dict):
+        payload["_governance"]["pending_delete"] = {
+            "version": pending_delete.get("version_no"),
+            "status": pending_delete.get("status"),
+            "action": pending_delete.get("action"),
+            "created_by": pending_delete.get("created_by"),
+        }
     return payload
+
+
+def _agent_credential_status(payload: dict, runtime) -> dict:
+    orchestration = payload.get("orchestration") or {}
+    if orchestration.get("mode") != "external_agent":
+        return payload
+    connection = orchestration.get("connection") or {}
+    credential_ref = str(connection.get("credential_ref")
+                         or "customer-agent-default")
+    return {**payload,
+            "credential_configured": runtime.external_credentials.configured(
+                credential_ref)}
+
+
+def _external_agent_error_response(error):
+    from fastapi.responses import JSONResponse
+
+    if isinstance(error, ExternalAgentError):
+        status = error.status or (401 if error.code == "UNAUTHORIZED" else 422)
+        if status >= 500:
+            status = 504 if status == 504 else 502
+        return JSONResponse({"detail": str(error), "code": error.code},
+                            status_code=status)
+    return JSONResponse({"detail": str(error), "code": "INVALID_REQUEST"},
+                        status_code=422)
 
 
 def create_app(config_dir: Path = Path("config"),
                data_dir: Path | None = None):
     """应用工厂（测试直接用 tmp 目录）。"""
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import FastAPI, HTTPException, Request, Query
     from fastapi.responses import FileResponse, JSONResponse
     from pydantic import BaseModel
 
     studio = Studio(Path(config_dir), data_dir)
     app = FastAPI(title="Flow Studio", docs_url=None, redoc_url=None)
     app.state.studio = studio
+
+    @app.exception_handler(RunQueueFull)
+    async def queue_full(request: Request, error: RunQueueFull):
+        return JSONResponse({"detail": str(error), "code": "run_queue_full"}, status_code=429)
 
     def error_response(error: GovernanceError, request_id: str):
         return JSONResponse(
@@ -175,7 +217,10 @@ def create_app(config_dir: Path = Path("config"),
         }
         governed = path.startswith("/api/") or path.startswith("/media/")
         try:
-            if governed and not public:
+            if path == "/api/homepage/command":
+                if not studio.homepage.authorized(request.headers.get("Authorization", "")):
+                    raise GovernanceError("authentication_required", "主页入口认证失败", 401)
+            elif governed and not public:
                 if not studio.governance.is_initialized():
                     raise GovernanceError(
                         "setup_required", "请先初始化 owner 账号", 503)
@@ -209,13 +254,60 @@ def create_app(config_dir: Path = Path("config"),
 
     class RunBody(BaseModel):
         inputs: dict = {}
+        background: bool = False
 
     class ChatBody(BaseModel):
         message: str
+        background: bool = False
+
+    class HomepageBody(BaseModel):
+        message: str
+        refresh: bool = False
+        sessionId: str = ""
+
+    @app.post("/api/homepage/command")
+    def homepage_command(body: HomepageBody):
+        message = body.message.strip()
+        if not message or len(message) > 2000:
+            raise HTTPException(422, "命令须为 1–2000 个字符")
+        session_id = body.sessionId.strip()
+        if session_id and (len(session_id) != 32
+                           or any(char not in "0123456789abcdef" for char in session_id)):
+            raise HTTPException(422, "页面会话标识无效")
+        try:
+            return JSONResponse(
+                studio.homepage.run(
+                    message, refresh=body.refresh, session_id=session_id),
+                headers={"Cache-Control": "no-store"})
+        except Exception:
+            log.exception("主页主流程执行失败")
+            return JSONResponse({"detail": "主页流程暂不可用"}, status_code=503,
+                                headers={"Cache-Control": "no-store"})
 
     class LlmBody(BaseModel):
         system: str = "你是得力助手。"
         prompt: str
+
+    def execute_flow(runtime, graph, inputs, principal, version_no,
+                     background=False, event_type="runtime.flow", details=None,
+                     metadata=None):
+        metadata = {"version_no": version_no, **(metadata or {})}
+
+        def completed(result):
+            studio.governance.audit(
+                event_type, workspace_id=principal.workspace_id,
+                user_id=principal.user_id, username=principal.username,
+                resource_type="flow", resource_id=graph.id, version_no=version_no,
+                request_id=principal.request_id,
+                outcome="success" if result.get("status") == "success" else "failed",
+                details={"run_id": result["run_id"], "status": result.get("status"),
+                         **(details or {})})
+
+        if background:
+            return runtime.start_flow(graph, inputs, on_complete=completed, metadata=metadata)
+        result = runtime.run_flow(graph, inputs, metadata=metadata)
+        completed(result)
+        return result
 
     @app.get("/api/setup/status")
     def setup_status():
@@ -440,11 +532,17 @@ def create_app(config_dir: Path = Path("config"),
             raise GovernanceError("preview_delete", "删除版本不能预览运行", 409)
         if resource_type == "flow":
             graph = graph_from_dict(version["snapshot"])
-            result = runtime.run_flow(graph, body.get("inputs") or {})
+            result = execute_flow(
+                runtime, graph, body.get("inputs") or {}, principal, version_no,
+                background=body.get("background") is True, event_type="runtime.preview",
+                metadata={"preview": True})
+            return JSONResponse(result, status_code=202) if body.get("background") is True else result
         else:
             result = runtime.agent_rt.run(
                 version["snapshot"], str(body.get("message") or ""),
-                session_id=body.get("session_id") or None)
+                session_id=body.get("session_id") or None,
+                skill_id=body.get("skill_id") or None,
+                context=body.get("context") if isinstance(body.get("context"), dict) else None)
         result["preview"] = True
         result["version_no"] = version_no
         studio.governance.audit(
@@ -488,10 +586,18 @@ def create_app(config_dir: Path = Path("config"),
         out = []
         for version in studio.versions.list_effective(principal, "flow"):
             snapshot = version.get("snapshot") or {}
+            ai_agent_ids = sorted({
+                str((node.get("params") or {}).get("ai_agent_id") or "").strip()
+                for node in snapshot.get("nodes") or []
+                if node.get("type") == "ai_agent"
+                and str((node.get("params") or {}).get("ai_agent_id") or "").strip()
+            })
             out.append({"id": version["resource_id"],
                         "name": snapshot.get("name") or version["resource_id"],
                         "description": snapshot.get("description") or "",
                         "triggers": snapshot.get("triggers") or [],
+                        "node_count": len(snapshot.get("nodes") or []),
+                        "ai_agent_ids": ai_agent_ids,
                         "_governance": _version_payload(version)["_governance"]})
         return out
 
@@ -550,15 +656,9 @@ def create_app(config_dir: Path = Path("config"),
                    if i.get("required") and not body.inputs.get(i["key"])]
         if missing:
             raise HTTPException(422, f"缺少必填输入：{'、'.join(missing)}")
-        result = _runtime(request).run_flow(g, body.inputs)
-        studio.governance.audit(
-            "runtime.flow", workspace_id=principal.workspace_id,
-            user_id=principal.user_id, username=principal.username,
-            resource_type="flow", resource_id=flow_id,
-            version_no=version["version_no"], request_id=principal.request_id,
-            outcome="failed" if result.get("status") == "failed" else "success",
-            details={"run_id": result.get("run_id"), "status": result.get("status")})
-        return result
+        result = execute_flow(_runtime(request), g, body.inputs, principal,
+                              version["version_no"], background=body.background)
+        return JSONResponse(result, status_code=202) if body.background else result
 
     @app.post("/api/agent/chat")
     def agent_chat(body: ChatBody, request: Request):
@@ -571,15 +671,14 @@ def create_app(config_dir: Path = Path("config"),
         version = studio.versions.published_snapshot(
             principal.workspace_id, "flow", routed.flow_id)
         graph = graph_from_dict(version["snapshot"])
-        run = runtime.run_flow(graph, routed.params)
+        run = execute_flow(runtime, graph, routed.params, principal, version["version_no"],
+                           background=body.background, event_type="runtime.chat",
+                           details={"matched": True})
         reply = run.get("output") or routed.reply or f"流程「{graph.name}」执行完成"
-        studio.governance.audit(
-            "runtime.chat", workspace_id=principal.workspace_id,
-            user_id=principal.user_id, username=principal.username,
-            resource_type="flow", resource_id=routed.flow_id,
-            version_no=version["version_no"], request_id=principal.request_id,
-            details={"run_id": run.get("run_id"), "matched": True})
-        return {**routed.to_dict(), "run": run, "reply": reply}
+        if body.background:
+            reply = "流程已开始，正在执行"
+        payload = {**routed.to_dict(), "run": run, "reply": reply}
+        return JSONResponse(payload, status_code=202) if body.background else payload
 
     @app.get("/api/agent/tools")
     def agent_tools(request: Request):
@@ -608,11 +707,22 @@ def create_app(config_dir: Path = Path("config"),
             raise HTTPException(404, f"运行记录不存在：{run_id}")
         return run
 
+    @app.get("/api/runs/{run_id}/events")
+    def run_events(run_id: str, request: Request,
+                   after: int = Query(default=0, ge=0),
+                   limit: int = Query(default=200, ge=1, le=500)):
+        page = _runtime(request).runs.events(run_id, after=after, limit=limit)
+        if page["run"] is None:
+            raise HTTPException(404, "运行记录不存在")
+        return JSONResponse(page, headers={"Cache-Control": "no-store"})
+
     # ---------------- 智能体平台：Agent / 知识库 / 记忆 / 技能 / MCP / 工具 ----------------
 
     @app.get("/api/ai-agents")
     def ai_agents(request: Request):
-        return [_version_payload(studio.versions.decorate(v)) for v in
+        runtime = _runtime(request)
+        return [_agent_credential_status(
+            _version_payload(studio.versions.decorate(v)), runtime) for v in
                 studio.versions.list_effective(_principal(request), "agent")]
 
     @app.post("/api/ai-agents")
@@ -628,12 +738,58 @@ def create_app(config_dir: Path = Path("config"),
         return _version_payload(studio.versions.save_draft(
             principal, "agent", snapshot["id"], snapshot))
 
+    @app.post("/api/ai-agents/external/catalog")
+    def external_agent_catalog(body: dict, request: Request):
+        runtime = _runtime(request)
+        provider = str(body.get("provider") or "customer-agent").strip()
+        if provider != "customer-agent":
+            return JSONResponse(
+                {"detail": f"暂不支持第三方智能体：{provider}",
+                 "code": "FEATURE_UNSUPPORTED"}, status_code=422)
+        credential_ref = str(body.get("credential_ref")
+                             or "customer-agent-default").strip()
+        token = str(body.get("token") or "").strip()
+        if not token:
+            token = runtime.external_credentials.resolve(credential_ref)
+        if not token:
+            from .bridge import _agent_token
+            token = _agent_token(runtime.bridge_cfg)
+        try:
+            catalog = CustomerAgentProvider(
+                str(body.get("base_url") or "http://127.0.0.1:3000"), token,
+                timeout=float(body.get("timeout") or 30)).catalog()
+            return JSONResponse(catalog, headers={"Cache-Control": "no-store"})
+        except (ExternalAgentError, ValueError) as error:
+            return _external_agent_error_response(error)
+
+    @app.get("/api/ai-agents/external/credentials/{credential_ref}")
+    def external_agent_credential_status(credential_ref: str, request: Request):
+        return {"credential_ref": credential_ref,
+                "configured": _runtime(request).external_credentials.configured(
+                    credential_ref)}
+
+    @app.put("/api/ai-agents/external/credentials/{credential_ref}")
+    def save_external_agent_credential(credential_ref: str, body: dict,
+                                       request: Request):
+        store = _runtime(request).external_credentials
+        try:
+            if body.get("clear") is True:
+                store.clear(credential_ref)
+            else:
+                store.replace(credential_ref, str(body.get("token") or ""))
+        except ValueError as error:
+            return JSONResponse({"detail": str(error), "code": "INVALID_REQUEST"},
+                                status_code=422)
+        return {"credential_ref": credential_ref,
+                "configured": store.configured(credential_ref)}
+
     @app.get("/api/ai-agents/{agent_id}")
     def get_ai_agent(agent_id: str, request: Request):
         version = studio.versions.effective_version(_principal(request), "agent", agent_id)
         if version is None:
             raise GovernanceError("agent_not_found", f"智能体不存在：{agent_id}", 404)
-        return _version_payload(studio.versions.decorate(version))
+        return _agent_credential_status(
+            _version_payload(studio.versions.decorate(version)), _runtime(request))
 
     @app.put("/api/ai-agents/{agent_id}")
     def save_ai_agent(agent_id: str, body: dict, request: Request):
@@ -665,7 +821,9 @@ def create_app(config_dir: Path = Path("config"),
         if not message:
             raise HTTPException(422, "message 不能为空")
         out = _runtime(request).agent_rt.run(
-            version["snapshot"], message, session_id=body.get("session_id") or None)
+            version["snapshot"], message, session_id=body.get("session_id") or None,
+            skill_id=body.get("skill_id") or None,
+            context=body.get("context") if isinstance(body.get("context"), dict) else None)
         out["ok"] = not out.get("error")
         studio.governance.audit(
             "runtime.agent", workspace_id=principal.workspace_id,

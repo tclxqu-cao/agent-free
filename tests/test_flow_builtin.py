@@ -21,7 +21,8 @@ def test_builtin_flows_shape():
     flows = builtin_flows()
     by_id = {f["id"]: f for f in flows}
     assert {"job-hunt-demo", "job-hunt-daily", "job-intent-demo",
-            "agent-brain-test", "video-demo"} == set(by_id)
+            "agent-brain-test", "video-demo", "project-intro-video",
+            "homepage-main"} == set(by_id)
     demo = graph_from_dict(by_id["job-hunt-demo"])
     types = {n.type for n in demo.nodes}
     assert {"start", "end", "agent", "condition", "llm", "template"} <= types
@@ -37,6 +38,56 @@ def test_builtin_flows_shape():
     intent_branches = [e["branch"] for e in intent_flow.edges
                        if e["from"] == router.id]
     assert set(intent_branches) == {"find_jobs", "trend_analysis", "else"}
+
+    # Homepage command translation and execution use one visible four-node graph.
+    homepage = graph_from_dict(by_id["homepage-main"])
+    nodes = {node.id: node for node in homepage.nodes}
+    assert homepage.name == "个人主页 · 主流程"
+    assert {node_id: nodes[node_id].label for node_id in nodes} == {
+        "start": "主页访客输入",
+        "prompt_decision": "任务提示词判断",
+        "homepage_agent": "小熊",
+        "end": "主页展示结果",
+    }
+    decision = nodes["prompt_decision"]
+    assert decision.type == "condition"
+    assert decision.params["source"] == "input.message"
+    assert [rule["name"] for rule in decision.params["outputs"]] == [
+        "help", "whoami", "works", "project", "timeline", "contact", "jobs",
+        "unknown-command",
+    ]
+    assert "{{input.message}}" in decision.params["default_output"]
+    assert any(item["key"] == "session_id"
+               for item in nodes["start"].params["inputs"])
+    assert nodes["homepage_agent"].params == {
+        "ai_agent_id": "homepage-agent",
+        "skill_id": "homepage-orchestrator",
+        "message": "{{prompt_decision.text}}",
+        "session_id": "{{input.session_id}}",
+        "context": {
+            "surface": "public-homepage",
+            "originalMessage": "{{input.message}}",
+            "promptRule": "{{prompt_decision.rule}}",
+            "jobSnapshot": "{{input.job_snapshot}}",
+        },
+        "required": True,
+    }
+    assert homepage.edges == [
+        {"from": "start", "to": "prompt_decision"},
+        {"from": "prompt_decision", "to": "homepage_agent"},
+        {"from": "homepage_agent", "to": "end"},
+    ]
+
+    project_video = graph_from_dict(by_id["project-intro-video"])
+    project_nodes = {node.id: node for node in project_video.nodes}
+    assert project_nodes["storyboard"].params["shot_count"] == 8
+    assert project_nodes["storyboard"].params["target_duration"] == 72
+    assert project_nodes["storyboard"].params["aspect_ratio"] == "16:9"
+    assert project_nodes["voiceover"].params["voice"] == "Serena"
+    assert project_nodes["compose"].type == "video_compose"
+    assert project_nodes["compose"].params["burn_subtitles"] is True
+    assert [node.type for node in project_video.nodes][-3:] == [
+        "voiceover", "video_compose", "end"]
 
 
 def test_demo_flow_runs_end_to_end(config_dir):

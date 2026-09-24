@@ -13,23 +13,21 @@ def store(tmp_path):
 
 
 def test_seed_and_list(store):
-    n = store.seed_if_empty(builtin_flows())
-    assert n == 5
-    assert store.seed_if_empty(builtin_flows()) == 0  # 幂等
-    assert [g.id for g in store.list()] == ["agent-brain-test", "job-hunt-daily",
-                                            "job-hunt-demo", "job-intent-demo",
-                                            "video-demo"]
+    flows = builtin_flows()
+    n = store.seed_if_empty(flows)
+    assert n == len(flows)
+    assert store.seed_if_empty(flows) == 0  # 幂等
+    assert [g.id for g in store.list()] == sorted(flow["id"] for flow in flows)
 
 
 def test_seed_missing_only_adds(store):
-    assert store.seed_if_empty(builtin_flows()[:2]) == 2
+    flows = builtin_flows()
+    assert store.seed_if_empty(flows[:2]) == 2
     # 增量补种：只加缺的，不动已有的
-    n = store.seed_missing(builtin_flows())
-    assert n == 3
-    assert {g.id for g in store.list()} == {"agent-brain-test", "job-hunt-daily",
-                                            "job-hunt-demo", "job-intent-demo",
-                                            "video-demo"}
-    assert store.seed_missing(builtin_flows()) == 0
+    n = store.seed_missing(flows)
+    assert n == len(flows) - 2
+    assert {g.id for g in store.list()} == {flow["id"] for flow in flows}
+    assert store.seed_missing(flows) == 0
 
 
 def test_save_get_delete_roundtrip(store):

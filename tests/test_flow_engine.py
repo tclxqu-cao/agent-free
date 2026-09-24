@@ -70,6 +70,78 @@ def test_condition_bad_expr_falls_to_else():
     assert run.status == "success" and run.output == "兜底"
 
 
+@pytest.mark.parametrize("operator,value,value_type,input_value,expected", [
+    ("equals", "/works", "string", "/works", "命中"),
+    ("contains", "岗位", "string", "看看岗位", "命中"),
+    ("greater_than", "10", "number", 11, "命中"),
+    ("equals", "true", "boolean", True, "命中"),
+    ("equals", "", "null", None, "命中"),
+    ("equals", "/works", "string", "/jobs", "兜底"),
+])
+def test_condition_structured_comparison(operator, value, value_type,
+                                         input_value, expected):
+    graph = _g([
+        _node("start", "start"),
+        _node("branch", "condition", source="input.value"),
+        _node("hit", "end", output="命中"),
+        _node("fallback", "end", output="兜底"),
+    ], [
+        {"from": "start", "to": "branch"},
+        {"from": "branch", "to": "hit", "operator": operator,
+         "value": value, "value_type": value_type},
+        {"from": "branch", "to": "fallback", "branch": "else"},
+    ])
+    run = FlowRunner().run(graph, {"value": input_value})
+    assert run.status == "success" and run.output == expected
+
+
+def test_condition_missing_structured_source_falls_to_else():
+    graph = _g([
+        _node("start", "start"), _node("branch", "condition", source="input.missing"),
+        _node("hit", "end", output="命中"), _node("fallback", "end", output="兜底"),
+    ], [
+        {"from": "start", "to": "branch"},
+        {"from": "branch", "to": "hit", "operator": "not_equals",
+         "value": "x", "value_type": "string"},
+        {"from": "branch", "to": "fallback", "branch": "else"},
+    ])
+    assert FlowRunner().run(graph, {}).output == "兜底"
+
+
+def test_condition_output_mode_selects_first_match_and_renders_template():
+    graph = _g([
+        _node("start", "start"),
+        _node("prompt", "condition", outputs=[
+            {"name": "project", "expression": "'/project ' in input.message",
+             "output": "查询项目资料：{{input.message}}"},
+            {"name": "fallback-project", "expression": "'project' in input.message",
+             "output": "不应命中"},
+        ], default_output="处理访客请求：{{input.message}}"),
+        _node("end", "end", output="{{prompt.rule}}|{{prompt.matched}}|{{prompt.text}}"),
+    ], [
+        {"from": "start", "to": "prompt"},
+        {"from": "prompt", "to": "end"},
+    ])
+
+    matched = FlowRunner().run(graph, {"message": "/project agentroam"})
+    assert matched.output == "project|True|查询项目资料：/project agentroam"
+
+    fallback = FlowRunner().run(graph, {"message": "你好"})
+    assert fallback.output == "default|False|处理访客请求：你好"
+
+
+def test_condition_output_mode_treats_bad_expression_as_not_matched():
+    graph = _g([
+        _node("start", "start"),
+        _node("prompt", "condition", outputs=[
+            {"name": "bad", "expression": "!!!bad!!!", "output": "bad"},
+        ], default_output="{{input.message}}"),
+        _node("end", "end", output="{{prompt.text}}"),
+    ], [{"from": "start", "to": "prompt"}, {"from": "prompt", "to": "end"}])
+
+    assert FlowRunner().run(graph, {"message": "原文"}).output == "原文"
+
+
 def test_llm_degrades_without_config():
     g = _g([
         _node("start", "start"),

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from .graph import FlowGraph, Node, graph_to_dict
+from .homepage_flows import homepage_flows
 
 
 def _demo_flow() -> FlowGraph:
@@ -255,7 +256,72 @@ def _video_flow() -> FlowGraph:
     )
 
 
+def _project_intro_video_flow() -> FlowGraph:
+    """项目介绍视频：项目简介 → 8 镜分镜 → 画面 → 配音 → 字幕成片。"""
+    return FlowGraph(
+        id="project-intro-video",
+        name="项目介绍 · 配音成片",
+        description="输入项目名称和简介，生成 8 镜、16:9、约 60–90 秒的中文介绍视频。"
+                    "逐镜调用 team-agent voice-service 的 Serena 配音，最终输出带字幕 MP4、"
+                    "连续 WAV 和 SRT；TTS 不可用时明确失败。",
+        triggers=["介绍当前项目的视频", "生成项目介绍视频", "给项目做个配音视频"],
+        nodes=[
+            Node(id="start", type="start", label="项目资料", pos={"x": 40, "y": 220},
+                 params={"inputs": [
+                     {"key": "project_name", "required": False, "default": "Flow Studio"},
+                     {"key": "project_brief", "required": False,
+                      "default": "Flow Studio 是一个在本机运行的可视化智能体编排平台。"
+                                 "它用流程图连接意图识别、智能体、技能、工具和外部服务。"
+                                 "用户可以在画布上编辑节点与条件分支，并直接调试运行。"
+                                 "执行时界面会实时显示当前节点、滚动日志与完整异常堆栈。"
+                                 "工作流数据按 Workspace 保存，运行历史可以回看。"
+                                 "图片、视频、音频和字幕统一进入素材库。"
+                                 "它既能承载岗位搜索，也能执行日常自动化和内容生产。"
+                                 "现在还可以复用 team-agent 的语音模型生成旁白成片。"},
+                 ]}),
+            Node(id="storyboard", type="storyboard", label="项目分镜", pos={"x": 280, "y": 220},
+                 params={"story": "项目名称：{{input.project_name}}\n{{input.project_brief}}",
+                         "shot_count": 8, "target_duration": 72,
+                         "aspect_ratio": "16:9",
+                         "style": "现代科技产品，真实软件界面，清晰克制，专业演示片"}),
+            Node(id="keyframe", type="keyframe", label="项目画面", pos={"x": 520, "y": 220},
+                 params={"shots_source": "{{storyboard.shots}}",
+                         "characters_source": "", "aspect_ratio": "",
+                         "style": "现代科技产品演示，界面细节清晰，避免人物肖像"}),
+            Node(id="shot_video", type="shot_video", label="镜头动画", pos={"x": 760, "y": 220},
+                 params={"frames_source": "{{keyframe.frames}}",
+                         "shots_source": "{{storyboard.shots}}",
+                         "duration": 9, "aspect_ratio": "", "optional": False}),
+            Node(id="voiceover", type="voiceover", label="Serena 配音", pos={"x": 1000, "y": 220},
+                 params={"shots_source": "{{storyboard.shots}}",
+                         "voice": "Serena", "speed": 1.0}),
+            Node(id="compose", type="video_compose", label="字幕成片", pos={"x": 1240, "y": 220},
+                 params={"clips_source": "{{shot_video.clips}}",
+                         "voiceovers_source": "{{voiceover.tracks}}",
+                         "subtitles_source": "{{voiceover.subtitles}}",
+                         "title": "{{input.project_name}}-项目介绍-{{vars.today}}",
+                         "burn_subtitles": True}),
+            Node(id="end", type="end", label="完成", pos={"x": 1480, "y": 220},
+                 params={"output":
+                         "🎬 {{input.project_name}} 项目介绍视频已完成\n"
+                         "① {{storyboard.text}}\n"
+                         "② {{shot_video.text}}\n"
+                         "③ {{voiceover.text}}\n"
+                         "④ {{compose.text}}"}),
+        ],
+        edges=[
+            {"from": "start", "to": "storyboard"},
+            {"from": "storyboard", "to": "keyframe"},
+            {"from": "keyframe", "to": "shot_video"},
+            {"from": "shot_video", "to": "voiceover"},
+            {"from": "voiceover", "to": "compose"},
+            {"from": "compose", "to": "end"},
+        ],
+    )
+
+
 def builtin_flows() -> list[dict]:
     return [graph_to_dict(_demo_flow()), graph_to_dict(_daily_flow()),
             graph_to_dict(_intent_flow()), graph_to_dict(_brain_flow()),
-            graph_to_dict(_video_flow())]
+            graph_to_dict(_video_flow()), graph_to_dict(_project_intro_video_flow()),
+            *homepage_flows()]

@@ -22,9 +22,136 @@ def test_health_and_static(client):
 def test_node_types_and_agents(client):
     types = client.get("/api/node-types").json()
     assert {"start", "end", "llm", "agent", "condition", "template", "http"} <= set(types)
+    assert any(field["key"] == "source" for field in types["condition"]["form"])
     agents = client.get("/api/agents").json()
     job = next(a for a in agents if a["agent"] == "job_agent")
     assert any(a["action"] == "match_today" for a in job["actions"])
+
+
+def test_condition_builder_is_served(client):
+    script = client.get("/app.js")
+    assert script.status_code == 200
+    assert "askConditionRule" in script.text
+    assert "CONDITION_OPERATORS" in script.text
+    assert "data-condition-edge" in script.text
+
+
+def test_saved_graph_rebuilds_transient_edge_ids(client):
+    script = client.get("/app.js").text
+    save_block = script.split("async function saveFlow()", 1)[1].split(
+        "function graphBody()", 1)[0]
+    assert "state.graph = saved;" in save_block
+    assert "state.sel = null;\n    renderWorld();\n    renderInspector();" in save_block
+
+
+def test_external_agent_editor_is_served(client):
+    script = client.get("/app.js").text
+    style = client.get("/style.css").text
+    assert 'data-ag-mode="react"' in script
+    assert 'data-ag-mode="external_agent"' in script
+    assert 'data-ag-mode="flow"' in script
+    assert "/api/ai-agents/external/catalog" in script
+    assert "mcpServers" in script and "ag-ca-memory" in script
+    assert "toolPolicies" in script and "ag-ca-tool-policy" in script
+    assert "ag-ca-include-identity" in script
+    assert "include_identity_instructions" in script
+    assert "agentOrchestrationMode" in script and "第三方智能体" in script
+    assert "agentPendingDelete" in script and "删除草稿" in script
+    assert ".ag-cap-option[hidden]" in style
+
+
+def test_compact_agent_cards_and_theme_toggle_are_served(client):
+    page = client.get("/").text
+    script = client.get("/app.js").text
+    style = client.get("/style.css").text
+
+    assert 'id="btn-theme"' in page
+    assert "flow-studio-theme" in page and "flow-studio-theme" in script
+    assert 'data-theme="light"' in style
+    assert "agentPendingDelete" in script
+    home = script.split("function renderAgentsHome()", 1)[1].split(
+        "/* ================= 智能体对话面板", 1)[0]
+    assert 'class="res-tags"' not in home
+    assert 'class="agent-ico"' not in home and 'class="agent-id"' not in home
+    assert "grid-template-columns: repeat(auto-fit, minmax(68px, 1fr))" in style
+
+
+def test_mobile_navigation_and_compact_flow_cards_are_served(client):
+    page = client.get("/").text
+    script = client.get("/app.js").text
+    style = client.get("/style.css").text
+
+    assert 'class="nav-actions"' in page
+    assert 'id="btn-logout"' in page and 'aria-label="退出登录"' in page
+    assert 'grid-template-areas: "brand tabs" "actions actions"' in style
+    assert ".nav-actions .icon-btn" in style
+    flow_home = script.split("function renderFlowsHome()", 1)[1].split(
+        "function agentOrchestrationMode", 1)[0]
+    assert 'class="flow-desc"' not in flow_home
+
+
+def test_agent_delete_draft_is_visible_until_published(client):
+    created = client.post("/api/ai-agents", json={
+        "id": "delete-visible", "name": "Delete Visible",
+    })
+    assert created.status_code == 200
+    for action in ("submit", "approve", "publish"):
+        response = client.post(
+            "/api/governance/resources/agent/delete-visible/versions/1/" + action,
+            json={"reason": "prepare deletion test"},
+        )
+        assert response.status_code == 200, response.text
+
+    deleted = client.delete("/api/ai-agents/delete-visible")
+    assert deleted.status_code == 200
+    assert deleted.json()["_governance"] == {
+        "version": 2,
+        "status": "draft",
+        "action": "delete",
+        "published_version": 1,
+        "created_by": deleted.json()["_governance"]["created_by"],
+    }
+
+    listed = client.get("/api/ai-agents").json()
+    agent = next(item for item in listed if item["id"] == "delete-visible")
+    assert agent["_governance"]["version"] == 1
+    assert agent["_governance"]["status"] == "published"
+    assert agent["_governance"]["pending_delete"] == {
+        "version": 2,
+        "status": "draft",
+        "action": "delete",
+        "created_by": deleted.json()["_governance"]["created_by"],
+    }
+
+
+def test_external_agent_credentials_and_catalog_proxy(client, monkeypatch):
+    captured = {}
+
+    class FakeProvider:
+        def __init__(self, base_url, token, timeout):
+            captured.update(base_url=base_url, token=token, timeout=timeout)
+
+        def catalog(self):
+            return {"protocolVersion": "1", "provider": {"id": "customer-agent"},
+                    "features": {"streaming": True, "memory": True,
+                                 "cancellation": True},
+                    "models": [], "skills": [], "tools": [], "mcpServers": []}
+
+    monkeypatch.setattr("flow_studio.server.CustomerAgentProvider", FakeProvider)
+    ref = "ca-test"
+    status = client.get(f"/api/ai-agents/external/credentials/{ref}").json()
+    assert status == {"credential_ref": ref, "configured": False}
+    fetched = client.post("/api/ai-agents/external/catalog", json={
+        "provider": "customer-agent", "base_url": "http://127.0.0.1:3000",
+        "credential_ref": ref, "token": "one-shot",
+    })
+    assert fetched.status_code == 200 and captured["token"] == "one-shot"
+    assert client.get(f"/api/ai-agents/external/credentials/{ref}").json()["configured"] is False
+    saved = client.put(f"/api/ai-agents/external/credentials/{ref}",
+                       json={"token": "stored"}).json()
+    assert saved["configured"] is True
+    client.put(f"/api/ai-agents/external/credentials/{ref}", json={"clear": True})
+    assert client.get(f"/api/ai-agents/external/credentials/{ref}").json()["configured"] is False
 
 
 def test_flow_crud_and_validation(client):

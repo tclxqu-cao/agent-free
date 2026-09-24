@@ -2,7 +2,8 @@
 
 import pytest
 
-from flow_studio.template import ExprError, build_namespace, eval_expr, render, render_deep
+from flow_studio.template import (ExprError, build_namespace, compare_value,
+                                  eval_expr, render, render_deep, resolve_path)
 
 
 @pytest.fixture
@@ -28,6 +29,22 @@ def test_render_missing_and_types(ns):
 def test_render_deep(ns):
     assert render_deep({"a": "{{input.kw}}", "list": ["{{match.total}}", 1]}, ns) == \
         {"a": "Java", "list": ["8", 1]}
+
+
+def test_resolve_path_is_data_only(ns):
+    assert resolve_path("input.city", ns) == (True, "苏州")
+    assert resolve_path("match.jobs.0.title", ns) == (True, "Java 架构师")
+    assert resolve_path("missing.value", ns) == (False, None)
+    assert resolve_path("input.city.lower()", ns) == (False, None)
+
+
+def test_compare_value_structured_operators():
+    assert compare_value("/works", "equals", "/works")
+    assert compare_value("AgentRoam portfolio", "contains", "AgentRoam")
+    assert compare_value(["a", "b"], "not_contains", "c")
+    assert compare_value(8, "greater_or_equal", 8)
+    with pytest.raises(ExprError):
+        compare_value("x", "execute", "y")
 
 
 def test_eval_ok(ns):

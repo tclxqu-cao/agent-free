@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "id": "kb-assistant",
+      "name": "知识助手",
+      "description": "绑定知识库与长期记忆的问答智能体（内置示例，可改）",
+      "system": "你是一个严谨的知识助手。优先依据工具检索到的知识库片段回答；资料不足时如实说明，不要编造。",
+      "orchestration": {
+        "mode": "react"
+      },
+      "tool_ids": [
+        "kb_search",
+        "memory_save",
+        "memory_load",
+        "now"
+      ],
+      "memory": true,
+      "max_steps": 8
+    },
+    {
+      "id": "homepage-agent",
+      "name": "小熊",
+      "description": "通过 Customer Agent 编排主页内容查询、优化和渲染 Skills",
+      "system": "你是个人主页智能体小熊。严格遵循本次激活的 homepage-orchestrator，所有本机能力只读，最终返回合法的 PortfolioArtifactV1 JSON 制品。",
+      "orchestration": {
+        "mode": "external_agent",
+        "provider": "customer-agent",
+        "agent_id": "",
+        "connection": {
+          "base_url": "http://127.0.0.1:3000",
+          "credential_ref": "customer-agent-default"
+        },
+        "selection": {
+          "model_id": "aihub-deepseek",
+          "skill_ids": [
+            "homepage-orchestrator",
+            "wiki-query",
+            "llm-wiki",
+            "homepage-content-polish",
+            "homepage-content-render"
+          ],
+          "tool_ids": [
+            "skill_load",
+            "bash",
+            "read_file",
+            "grep",
+            "glob"
+          ],
+          "mcp_server_ids": [],
+          "memory_enabled": false,
+          "tool_policy_id": "local-readonly"
+        }
+      },
+      "max_steps": 10
+    }
+  ]
+}

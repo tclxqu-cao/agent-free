@@ -1,7 +1,7 @@
 """图模型：FlowGraph / Node / 边，节点类型元数据与校验。
 
-流程 = 节点（type + label + params）+ 有向边（from/to/branch）。
-条件分支写在 condition 节点的出边 branch 上（表达式或 "else"），节点本身无参数。
+流程 = 节点（type + label + params）+ 有向边（from/to/branch 或结构化比较）。
+条件节点可配置安全取值路径；出边使用结构化比较或旧 branch 表达式。
 """
 
 from __future__ import annotations
@@ -56,8 +56,10 @@ NODE_TYPES: dict[str, dict] = {
     },
     "condition": {
         "label": "条件", "icon": "◆", "color": "#f59e0b",
-        "desc": "按出边顺序求值 branch 表达式，走第一条为真的（else 兜底）",
-        "form": [],
+        "desc": "按表达式选择分支，或在节点内按顺序匹配并输出文本",
+        "form": [{"key": "source", "widget": "text", "label": "取值路径",
+                  "default": "input.message",
+                  "hint": "如 input.message、match.total、route.intent"}],
     },
     "intent": {
         "label": "意图", "icon": "🎯", "color": "#e11d48",
@@ -91,6 +93,8 @@ NODE_TYPES: dict[str, dict] = {
                 "工具循环推理后输出 {text, steps, tool_calls, session_id}",
         "form": [{"key": "message", "widget": "textarea", "label": "发给智能体的话（模板）",
                   "default": "{{input.message}}", "rows": 6},
+                 {"key": "context", "widget": "json", "label": "结构化上下文（可用模板）",
+                  "default": "{}"},
                  {"key": "session_id", "widget": "text", "label": "会话 ID（留空=每次新会话）",
                   "default": ""},
                  {"key": "required", "widget": "bool", "label": "失败时中断流程",
@@ -155,6 +159,8 @@ NODE_TYPES: dict[str, dict] = {
         "form": [{"key": "story", "widget": "textarea", "label": "剧情提示词（模板）",
                   "default": "{{input.story}}", "rows": 5},
                  {"key": "shot_count", "widget": "number", "label": "镜头数", "default": 4},
+                 {"key": "target_duration", "widget": "number",
+                  "label": "目标总时长（秒，0=自动）", "default": 0},
                  {"key": "aspect_ratio", "widget": "select", "label": "画面比例（项目级）",
                   "options": ["16:9", "9:16", "1:1", "4:3"], "default": "16:9"},
                  {"key": "style", "widget": "text", "label": "画面风格",
@@ -214,6 +220,30 @@ NODE_TYPES: dict[str, dict] = {
                  {"key": "optional", "widget": "bool", "label": "失败时降级跳过",
                   "default": False}],
     },
+    "voiceover": {
+        "label": "配音", "icon": "🔊", "color": "#2563eb",
+        "desc": "调用 team-agent voice-service，按分镜 narration 逐镜生成 WAV 配音",
+        "form": [{"key": "shots_source", "widget": "textarea", "label": "分镜列表来源",
+                  "default": "{{storyboard.shots}}"},
+                 {"key": "voice", "widget": "text", "label": "音色（留空继承模型设置）",
+                  "default": ""},
+                 {"key": "speed", "widget": "number", "label": "语速（0.5–2.0）",
+                  "default": 1.0}],
+    },
+    "video_compose": {
+        "label": "成片", "icon": "🎞", "color": "#0f766e",
+        "desc": "对齐逐镜视频和配音，生成字幕并合成带旁白的 MP4",
+        "form": [{"key": "clips_source", "widget": "textarea", "label": "镜头视频来源",
+                  "default": "{{shot_video.clips}}"},
+                 {"key": "voiceovers_source", "widget": "textarea", "label": "逐镜配音来源",
+                  "default": "{{voiceover.tracks}}"},
+                 {"key": "subtitles_source", "widget": "textarea", "label": "字幕来源",
+                  "default": "{{voiceover.subtitles}}"},
+                 {"key": "title", "widget": "text", "label": "成片名称",
+                  "default": "项目介绍-{{vars.today}}"},
+                 {"key": "burn_subtitles", "widget": "bool", "label": "烧录中文字幕",
+                  "default": True}],
+    },
     "asset": {
         "label": "素材", "icon": "📦", "color": "#64748b",
         "desc": "引用素材库中的一个素材（图片/视频/音频），输出 {asset_id, kind, path, url}",
@@ -240,7 +270,7 @@ class FlowGraph:
     id: str
     name: str
     nodes: list[Node] = field(default_factory=list)
-    edges: list[dict] = field(default_factory=list)   # {from, to, branch?}
+    edges: list[dict] = field(default_factory=list)   # {from,to,branch?} 或结构化比较
     description: str = ""
     triggers: list[str] = field(default_factory=list)  # 意图触发示例话术
     version: int = 1
@@ -290,7 +320,10 @@ def graph_from_dict(data: dict) -> FlowGraph:
                     pos=dict(n.get("pos") or {}))
                for n in (data.get("nodes") or []) if n.get("id") and n.get("type")],
         edges=[{"from": str(e["from"]), "to": str(e["to"]),
-                **({"branch": str(e["branch"])} if e.get("branch") else {})}
+                **({"branch": str(e["branch"])} if e.get("branch") else {}),
+                **({"operator": str(e["operator"])} if e.get("operator") else {}),
+                **({"value": e.get("value")} if "value" in e else {}),
+                **({"value_type": str(e["value_type"])} if e.get("value_type") else {})}
                for e in (data.get("edges") or []) if e.get("from") and e.get("to")],
     )
     errors = validate(g)
@@ -324,10 +357,51 @@ def validate(g: FlowGraph) -> list[str]:
             errors.append(f"连线起点不存在：{e['from']}")
         if e["to"] not in ids:
             errors.append(f"连线终点不存在：{e['to']}")
-    for e in g.edges:  # 条件出边必须带 branch
+    condition_operators = {"equals", "not_equals", "contains", "not_contains",
+                           "greater_than", "greater_or_equal",
+                           "less_than", "less_or_equal"}
+    condition_value_types = {"string", "number", "boolean", "null"}
+    for node in (n for n in g.nodes if n.type == "condition" and "outputs" in n.params):
+        outputs = node.params.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            errors.append(f"条件节点「{node.id}」的输出规则必须是非空数组")
+            continue
+        names: list[str] = []
+        for index, rule in enumerate(outputs, start=1):
+            if not isinstance(rule, dict):
+                errors.append(f"条件节点「{node.id}」的第 {index} 条输出规则必须是对象")
+                continue
+            name = str(rule.get("name") or "").strip()
+            expression = str(rule.get("expression") or "").strip()
+            if not name:
+                errors.append(f"条件节点「{node.id}」的第 {index} 条输出规则缺少名称")
+            elif name in names:
+                errors.append(f"条件节点「{node.id}」的输出规则名称重复：{name}")
+            else:
+                names.append(name)
+            if not expression:
+                errors.append(f"条件节点「{node.id}」的输出规则「{name or index}」缺少表达式")
+            if not isinstance(rule.get("output"), str):
+                errors.append(f"条件节点「{node.id}」的输出规则「{name or index}」缺少文本输出")
+        if not isinstance(node.params.get("default_output"), str):
+            errors.append(f"条件节点「{node.id}」缺少默认输出文本")
+        outgoing = [edge for edge in g.edges if edge["from"] == node.id]
+        if len(outgoing) != 1:
+            errors.append(f"条件节点「{node.id}」的输出模式必须恰好连接 1 个下游节点")
+        elif any(outgoing[0].get(key) for key in ("branch", "operator")):
+            errors.append(f"条件节点「{node.id}」的输出模式下游连线不能配置分支规则")
+    for e in g.edges:  # 条件出边必须带表达式、结构化比较或 else
         src = next((n for n in g.nodes if n.id == e["from"]), None)
-        if src and src.type == "condition" and not e.get("branch"):
-            errors.append(f"条件节点「{src.id}」的出边缺少 branch 表达式")
+        if src and src.type == "condition" and "outputs" not in src.params:
+            branch = str(e.get("branch") or "").strip()
+            operator = str(e.get("operator") or "").strip()
+            if not branch and not operator:
+                errors.append(f"条件节点「{src.id}」的出边缺少比较规则或 branch 表达式")
+            if operator and operator not in condition_operators:
+                errors.append(f"条件节点「{src.id}」使用未知运算符：{operator}")
+            value_type = str(e.get("value_type") or "string").strip()
+            if operator and value_type not in condition_value_types:
+                errors.append(f"条件节点「{src.id}」使用未知比较值类型：{value_type}")
         if src and src.type == "intent":
             declared = {str(i.get("name") or "").strip()
                         for i in (src.params.get("intents") or []) if i.get("name")}

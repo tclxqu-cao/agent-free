@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from flow_studio.governance import (GovernanceError, GovernanceStore,
                                     hash_password, sanitize_details,
                                     verify_password)
+from flow_studio.policy import PolicyEngine
 from flow_studio.server import create_app
 
 
@@ -60,11 +61,87 @@ def version_action(client, resource_type, resource_id, version, action, reason="
         f"{version}/{action}", json={"reason": reason})
 
 
+def flow_body(flow_id, *agent_ids):
+    nodes = [
+        {"id": "start", "type": "start"},
+        {"id": "end", "type": "end", "params": {"output": "ok"}},
+    ]
+    nodes.extend({
+        "id": f"agent-{index}", "type": "ai_agent",
+        "params": {"ai_agent_id": agent_id, "message": "{{input.message}}"},
+    } for index, agent_id in enumerate(agent_ids, 1))
+    return {
+        "id": flow_id, "name": flow_id, "nodes": nodes,
+        "edges": [{"from": "start", "to": "end"}],
+    }
+
+
+def test_external_agent_capabilities_do_not_require_local_workspace_resources():
+    context = {
+        "skill_ids": ["local-skill"],
+        "mcp_ids": ["local-mcp"],
+        "kb_ids": [],
+        "policy": {},
+    }
+    result = PolicyEngine().evaluate("submit", "agent", {
+        "orchestration": {"mode": "external_agent"},
+        "skill_ids": ["customer-agent-skill"],
+        "mcp_servers": ["customer-agent-mcp"],
+    }, context)
+
+    assert result.allowed
+
+
+def test_local_agent_capabilities_still_require_workspace_resources():
+    context = {
+        "skill_ids": ["local-skill"],
+        "mcp_ids": ["local-mcp"],
+        "kb_ids": [],
+        "policy": {},
+    }
+    result = PolicyEngine().evaluate("submit", "agent", {
+        "orchestration": {"mode": "react"},
+        "skill_ids": ["missing-skill"],
+        "mcp_servers": ["missing-mcp"],
+    }, context)
+
+    assert not result.allowed
+    assert [(violation.code, violation.path) for violation in result.violations] == [
+        ("cross_workspace_reference", "skill_ids"),
+        ("cross_workspace_reference", "mcp_servers"),
+    ]
+
+
+def test_external_agent_capabilities_still_honor_policy_denials():
+    result = PolicyEngine().evaluate("submit", "agent", {
+        "orchestration": {"mode": "external_agent"},
+        "tool_ids": ["blocked-tool"],
+        "mcp_servers": ["blocked-mcp"],
+    }, {
+        "skill_ids": [],
+        "mcp_ids": [],
+        "kb_ids": [],
+        "policy": {
+            "denied_tools": ["blocked-tool"],
+            "denied_mcp_servers": ["blocked-mcp"],
+        },
+    })
+
+    assert not result.allowed
+    assert [(violation.code, violation.path) for violation in result.violations] == [
+        ("tool_denied", "tool_ids"),
+        ("mcp_denied", "mcp_servers"),
+    ]
+
+
 def test_password_hash_and_audit_redaction():
-    encoded = hash_password(PASSWORD)
+    encoded = hash_password("123")
     assert encoded.startswith("scrypt$")
-    assert verify_password(PASSWORD, encoded)
+    assert verify_password("123", encoded)
     assert not verify_password("wrong-password", encoded)
+    with pytest.raises(GovernanceError) as caught:
+        hash_password("")
+    assert caught.value.code == "invalid_password"
     cleaned = sanitize_details({
         "password": "secret", "nested": {"api_key": "key", "safe": "ok"},
     })
@@ -218,3 +295,76 @@ def test_legacy_migration_is_copy_only_and_idempotent(config_dir, tmp_path):
     owner2 = login(app2, "owner")
     versions2 = owner2.get("/api/governance/resources/flow/legacy/versions").json()
     assert len(versions2) == 1
+
+
+def test_agent_save_rejects_cycle_with_flow_that_references_it(config_dir, tmp_path):
+    app = create_app(config_dir, tmp_path / "data")
+    owner = setup_owner(app)
+    assert owner.post("/api/ai-agents", json={
+        "id": "cycle-agent", "name": "Cycle Agent",
+    }).status_code == 200
+    assert owner.post("/api/flows", json=flow_body(
+        "cycle-flow", "cycle-agent")).status_code == 200
+
+    blocked = owner.put("/api/ai-agents/cycle-agent", json={
+        "name": "Cycle Agent", "flow_id": "cycle-flow",
+    })
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "dependency_cycle"
+    assert [item["id"] for item in blocked.json()["policy"]["cycle"]] == [
+        "cycle-agent", "cycle-flow", "cycle-agent"]
+
+
+def test_flow_save_rejects_cycle_with_agent_bound_to_it(config_dir, tmp_path):
+    app = create_app(config_dir, tmp_path / "data")
+    owner = setup_owner(app)
+    assert owner.post("/api/flows", json=flow_body("bound-flow")).status_code == 200
+    assert owner.post("/api/ai-agents", json={
+        "id": "bound-agent", "name": "Bound Agent", "flow_id": "bound-flow",
+    }).status_code == 200
+
+    blocked = owner.put("/api/flows/bound-flow", json=flow_body(
+        "bound-flow", "bound-agent"))
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "dependency_cycle"
+
+
+def test_indirect_dependency_cycle_is_rejected(config_dir, tmp_path):
+    app = create_app(config_dir, tmp_path / "data")
+    owner = setup_owner(app)
+    assert owner.post("/api/flows", json=flow_body("flow-one")).status_code == 200
+    assert owner.post("/api/flows", json=flow_body("flow-two")).status_code == 200
+    assert owner.post("/api/ai-agents", json={
+        "id": "agent-one", "name": "Agent One", "flow_id": "flow-one",
+    }).status_code == 200
+    assert owner.post("/api/ai-agents", json={
+        "id": "agent-two", "name": "Agent Two", "flow_id": "flow-two",
+    }).status_code == 200
+    assert owner.put("/api/flows/flow-one", json=flow_body(
+        "flow-one", "agent-two")).status_code == 200
+
+    blocked = owner.put("/api/flows/flow-two", json=flow_body(
+        "flow-two", "agent-one"))
+    assert blocked.status_code == 409
+    assert [item["id"] for item in blocked.json()["policy"]["cycle"]] == [
+        "flow-two", "agent-one", "flow-one", "agent-two", "flow-two"]
+
+
+def test_removing_dependency_allows_previously_blocked_binding(config_dir, tmp_path):
+    app = create_app(config_dir, tmp_path / "data")
+    owner = setup_owner(app)
+    assert owner.post("/api/ai-agents", json={
+        "id": "editable-agent", "name": "Editable Agent",
+    }).status_code == 200
+    assert owner.post("/api/flows", json=flow_body(
+        "editable-flow", "editable-agent")).status_code == 200
+    assert owner.put("/api/ai-agents/editable-agent", json={
+        "name": "Editable Agent", "flow_id": "editable-flow",
+    }).status_code == 409
+
+    assert owner.put("/api/flows/editable-flow", json=flow_body(
+        "editable-flow")).status_code == 200
+    allowed = owner.put("/api/ai-agents/editable-agent", json={
+        "name": "Editable Agent", "flow_id": "editable-flow",
+    })
+    assert allowed.status_code == 200

@@ -57,6 +57,57 @@ def test_condition_edge_requires_branch():
     assert any("branch" in e for e in errs)
 
 
+def test_condition_structured_edge_round_trip_and_validation():
+    data = _ok_graph()
+    data["nodes"].insert(1, {"id": "c", "type": "condition",
+                              "params": {"source": "input.kw"}})
+    data["edges"] = [
+        {"from": "start", "to": "c"},
+        {"from": "c", "to": "end", "operator": "equals",
+         "value": "Java", "value_type": "string"},
+    ]
+    graph = graph_from_dict(data)
+    assert graph.edges[1]["operator"] == "equals"
+    assert graph.edges[1]["value"] == "Java"
+
+    graph.edges[1]["operator"] = "execute"
+    assert any("未知运算符" in error for error in validate(graph))
+
+
+def test_condition_output_mode_accepts_one_plain_edge():
+    graph = _graph([
+        {"id": "s", "type": "start"},
+        {"id": "c", "type": "condition", "params": {
+            "outputs": [{"name": "works", "expression": "input.message == '/works'",
+                         "output": "查询项目"}],
+            "default_output": "{{input.message}}",
+        }},
+        {"id": "e", "type": "end"},
+    ], [{"from": "s", "to": "c"}, {"from": "c", "to": "e"}])
+
+    assert validate(graph) == []
+
+
+@pytest.mark.parametrize("params,edge,error", [
+    ({"outputs": [], "default_output": "x"}, {"from": "c", "to": "e"}, "非空数组"),
+    ({"outputs": [{"name": "x", "expression": "", "output": "x"}],
+      "default_output": "x"}, {"from": "c", "to": "e"}, "缺少表达式"),
+    ({"outputs": [{"name": "x", "expression": "True", "output": "x"},
+                  {"name": "x", "expression": "False", "output": "y"}],
+      "default_output": "x"}, {"from": "c", "to": "e"}, "名称重复"),
+    ({"outputs": [{"name": "x", "expression": "True", "output": "x"}],
+      "default_output": "x"}, {"from": "c", "to": "e", "branch": "else"}, "不能配置分支"),
+])
+def test_condition_output_mode_rejects_invalid_configuration(params, edge, error):
+    graph = _graph([
+        {"id": "s", "type": "start"},
+        {"id": "c", "type": "condition", "params": params},
+        {"id": "e", "type": "end"},
+    ], [{"from": "s", "to": "c"}, edge])
+
+    assert any(error in item for item in validate(graph))
+
+
 def test_intent_edge_branch_must_be_declared():
     params = {"intents": [{"name": "a"}, {"name": "b"}]}
     errs = validate(_graph(

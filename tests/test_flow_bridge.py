@@ -12,11 +12,17 @@ from flow_studio import bridge as bridge_mod
 class _FakeAgent(BaseHTTPRequestHandler):
     """最小 AgentRoam 假体：POST run -> 202 body；GET stream -> SSE done。"""
 
+    last_body = None
+    post_authorization = None
+    stream_authorization = None
+
     def log_message(self, *a):  # 静默
         pass
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).last_body = body
+        type(self).post_authorization = self.headers.get("Authorization")
         self._last_input = body["input"]
         payload = json.dumps({"sessionId": "s-1", "runId": "r-1",
                               "streamUrl": "/api/agent/stream?sessionId=s-1"}).encode()
@@ -27,11 +33,22 @@ class _FakeAgent(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
+        type(self).stream_authorization = self.headers.get("Authorization")
+        request = type(self).last_body or {}
+        if request.get("skillName"):
+            final_text = json.dumps({
+                "schemaVersion": 1,
+                "skill": request["skillName"],
+                "title": "Help",
+                "blocks": [{"type": "text", "text": "ok"}],
+            }, ensure_ascii=False)
+        else:
+            final_text = "你好，我是你的 agent"
         events = [
             {"type": "runtime_progress", "phase": "thinking", "label": "x"},
             {"type": "tool_call", "toolCall": {"id": "t1"}},
             {"type": "text_chunk", "text": "部分", "messagePhase": "commentary"},
-            {"type": "done", "finalText": "你好，我是你的 agent", "durationMs": 123},
+            {"type": "done", "finalText": final_text, "durationMs": 123},
         ]
         body = "".join(f"data: {json.dumps(e, ensure_ascii=False)}\n\n" for e in events).encode()
         self.send_response(200)
@@ -79,6 +96,29 @@ def test_agent_reason_error_event(tmp_path):
 def test_agent_reason_unreachable():
     with pytest.raises(Exception):
         bridge_mod.agent_reason({"base_url": "http://127.0.0.1:1"}, "hi", timeout=2)
+
+
+def test_agent_reason_forwards_configured_agent_and_skill(fake_server, monkeypatch):
+    monkeypatch.setenv("AGENT_RUN_TOKEN", "service-token")
+    out = bridge_mod.agent_reason(
+        {"base_url": fake_server}, "help", agent_id="configured-agent",
+        skill_name="configured-skill", context={"intent": "help"},
+        profile_id="model-profile", title="Configured run",
+        metadata={"flowId": "flow-1"}, source="flow-studio")
+    assert json.loads(out["text"])["skill"] == "configured-skill"
+    assert out["session_id"] == "s-1" and out["run_id"] == "r-1"
+    assert _FakeAgent.last_body == {
+        "input": "help",
+        "agentId": "configured-agent",
+        "skillName": "configured-skill",
+        "profileId": "model-profile",
+        "title": "Configured run",
+        "metadata": {"flowId": "flow-1"},
+        "context": {"intent": "help"},
+        "source": "flow-studio",
+    }
+    assert _FakeAgent.post_authorization == "Bearer service-token"
+    assert _FakeAgent.stream_authorization == "Bearer service-token"
 
 
 # ---------------- 引擎 brain 节点 ----------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from .job51 import Job51Site
 from .lagou import LagouSite
 from .liepin import LiepinSite
 from .zhilian import ZhilianSite
+
+log = logging.getLogger(__name__)
 
 REGISTRY: dict[str, type[BaseSite]] = {
     "boss": BossSite,
@@ -40,7 +43,7 @@ def dump_page(config: dict, config_path: Path, site_id: str, keyword: str, page)
     try:
         html.write_text(page.content(), encoding="utf-8")
     except Exception:
-        pass
+        log.exception("抓取页面留证失败：站点=%s，关键词=%s", site_id, keyword)
     return html
 
 
@@ -58,10 +61,14 @@ def scrape_site_keyword(site: BaseSite, page, keyword: str, max_cards: int,
     try:
         cards, total = site.extract(page, keyword, max_cards)
     except Exception:
+        log.exception("岗位列表提取失败，稍后重试：站点=%s，关键词=%s",
+                      site.site_id, keyword)
         human_delay(config, 3, 6)
         cards, total = site.extract(page, keyword, max_cards)
     db.record_keyword(today, keyword, site.site_id, total)
     if not cards:
+        log.warning("岗位列表为空，保存页面留证：站点=%s，关键词=%s",
+                    site.site_id, keyword)
         dump_page(config, config_path, site.site_id, keyword, page)
     count = 0
     for d in cards:
@@ -72,7 +79,8 @@ def scrape_site_keyword(site: BaseSite, page, keyword: str, max_cards: int,
             try:
                 job = site.detail(page, job)
             except Exception:
-                pass
+                log.exception("岗位详情抓取失败，保留列表信息：站点=%s，关键词=%s",
+                              site.site_id, keyword)
             human_delay(config, 1, 2)
         dist = compute_distance(job, geocoder, home)
         db.upsert_job(job, dist, today)
@@ -94,11 +102,14 @@ def scrape_all(config: dict, config_path: Path, db: DB,
     stats: dict = {"date": today, "total_jobs": 0, "runs": [], "errors": []}
     enabled = sites or config.get("sites") or list(REGISTRY)
 
+    log.info("岗位抓取开始：站点 %s 个，关键词 %s 个", len(enabled), len(keywords))
     with BrowserSession(config, config_path) as bs:
         for site_id in enabled:
+            log.info("招聘站点开始：%s", site_id)
             site = get_site(site_id, home.get("city"))
             page = bs.open(site_id)
             for kw in keywords:
+                log.info("岗位关键词抓取开始：站点=%s，关键词=%s", site_id, kw)
                 try:
                     count = scrape_site_keyword(
                         site, page, kw, max_cards, fetch_detail,
@@ -106,16 +117,23 @@ def scrape_all(config: dict, config_path: Path, db: DB,
                     db.record_run(today, site_id, kw, count, "ok")
                     stats["runs"].append({"site": site_id, "keyword": kw, "count": count})
                     stats["total_jobs"] += count
+                    log.info("岗位关键词抓取完成：站点=%s，关键词=%s，入库 %s 条",
+                             site_id, kw, count)
                 except Exception as e:
+                    log.exception("岗位关键词抓取失败：站点=%s，关键词=%s", site_id, kw)
                     db.record_run(today, site_id, kw, 0, "error", str(e)[:300])
                     stats["errors"].append({"site": site_id, "keyword": kw, "error": str(e)})
                     try:
                         dump_page(config, config_path, site_id, kw, page)
                     except Exception:
-                        pass
+                        log.exception("抓取失败后的页面留证失败：站点=%s，关键词=%s",
+                                      site_id, kw)
                 human_delay(config)
+            log.info("招聘站点结束：%s", site_id)
         try:
             db.mark_missing(today)
         except Exception:
-            pass
+            log.exception("更新失效岗位标记失败")
+    log.info("岗位抓取完成：入库 %s 条，失败 %s 项",
+             stats["total_jobs"], len(stats["errors"]))
     return stats

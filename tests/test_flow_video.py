@@ -4,21 +4,75 @@
 （相关断言用 has_ffmpeg 分支或 skip）。整机冒烟在 macOS + ffmpeg 8 完成。
 """
 
+import io
 import json
 import struct
+import subprocess
+import wave
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from flow_studio.assets import AssetStore
 from flow_studio.engine import FlowRunner
 from flow_studio.graph import graph_from_dict
-from flow_studio.video import (DEFAULT_MODELS, ASPECTS, VideoModels, concat_videos,
-                               gen_image, gen_video, has_ffmpeg,
+from flow_studio.speech import synthesize_wav, wav_duration
+from flow_studio.video import (DEFAULT_MODELS, ASPECTS, VideoModels, compose_narrated_video,
+                               concat_videos, gen_image, gen_video, has_ffmpeg,
                                placeholder_png_bytes, placeholder_video_bytes, probe_duration)
 from flow_studio.video_nodes import _fallback_shots, _resolve_list
 
 pytest.importorskip("fastapi", reason="服务测试需要 fastapi（uv sync --extra studio）")
+
+
+def _wav_bytes(duration: float = 0.4, rate: int = 16_000) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(b"\0\0" * max(1, round(duration * rate)))
+    return output.getvalue()
+
+
+# ---------------------------------------------------------------- team-agent TTS
+def test_synthesize_wav_uses_team_agent_contract(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+        content = _wav_bytes(0.25)
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr("flow_studio.speech.httpx.post", fake_post)
+    data = synthesize_wav(
+        {"enabled": True, "base_url": "https://voice.example.com", "token": "hidden",
+         "voice": "Serena", "timeout": 12},
+        "你好", voice="Serena", speed=1.0, session_id="flow-run-1", generation=0)
+    assert captured["url"] == "https://voice.example.com/v1/tts"
+    assert captured["json"] == {"sessionId": "flow-run-1", "generation": 0,
+                                 "text": "你好", "voice": "Serena", "speed": 1.0}
+    assert captured["headers"]["Authorization"] == "Bearer hidden"
+    assert wav_duration(data) == pytest.approx(0.25, abs=0.01)
+
+
+def test_synthesize_wav_loopback_and_remote_token_rules(monkeypatch):
+    class Response:
+        status_code = 200
+        content = _wav_bytes()
+
+    monkeypatch.setattr("flow_studio.speech.httpx.post", lambda *a, **kw: Response())
+    assert synthesize_wav({"base_url": "http://127.0.0.1:17863"}, "本机")[:4] == b"RIFF"
+    with pytest.raises(ValueError, match="必须配置 token"):
+        synthesize_wav({"base_url": "https://voice.example.com"}, "远程")
+    with pytest.raises(ValueError, match="0.5"):
+        synthesize_wav({"base_url": "http://localhost:17863"}, "太快", speed=3)
+    with pytest.raises(ValueError, match="有效 WAV"):
+        wav_duration(b"not-wave")
 
 
 # ---------------------------------------------------------------- 占位素材
@@ -162,6 +216,23 @@ def test_asset_store_crud_and_traversal_guard(tmp_path):
     assert store.delete(rec["id"]) is False
 
 
+def test_asset_store_concurrent_reads(tmp_path):
+    store = AssetStore(tmp_path / "media")
+    assets = [store.add_bytes(_wav_bytes(0.05), "wav", kind="audio") for _ in range(8)]
+
+    def read_asset(position):
+        item = assets[position % len(assets)]
+        record = store.get(item["id"])
+        path = store.file_path(item["path"])
+        return record["id"], path.stat().st_size
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(read_asset, range(240)))
+    assert len(results) == 240
+    assert {asset_id for asset_id, _ in results} == {item["id"] for item in assets}
+    assert all(size > 44 for _, size in results)
+
+
 # ---------------------------------------------------------------- 分镜节点
 def _runner(tmp_path):
     media = AssetStore(tmp_path / "media")
@@ -194,6 +265,7 @@ def test_storyboard_fallback_split(tmp_path):
     assert all(s["aspect_ratio"] == "9:16" for s in shots)
     assert any("水墨风" in s["image_prompt"] for s in shots)
     assert all(s["desc"] for s in shots)
+    assert all(s["narration"] for s in shots)
 
 
 def test_storyboard_llm_mock(monkeypatch, tmp_path):
@@ -221,6 +293,57 @@ def test_storyboard_llm_mock(monkeypatch, tmp_path):
 def test_fallback_shots_short_story():
     shots = _fallback_shots("只有一句", 3, "风格", "16:9")
     assert len(shots) == 3 and all(s["desc"] for s in shots)
+    assert all(s["narration"] == s["desc"] for s in shots)
+
+
+def test_voiceover_synthesizes_every_shot_in_order(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_tts(config, text, **kwargs):
+        calls.append((text, kwargs["session_id"], kwargs["voice"], kwargs["speed"]))
+        return _wav_bytes(0.2 + len(calls) / 10)
+
+    monkeypatch.setattr("flow_studio.video_nodes.synthesize_wav", fake_tts)
+    runner, media, vm = _runner(tmp_path)
+    vm.save({"speech": {"enabled": True, "base_url": "http://127.0.0.1:17863",
+                         "voice": "Serena", "speed": 1.0}})
+    g = _video_flow([
+        _n("start", "start"),
+        _n("sb", "storyboard", story="第一段。第二段。", shot_count=2),
+        _n("voice", "voiceover", shots_source="{{sb.shots}}", voice="Serena", speed=1),
+        _n("end", "end", output="{{voice.count}}:{{voice.voice}}"),
+    ], [{"from": "start", "to": "sb"}, {"from": "sb", "to": "voice"},
+        {"from": "voice", "to": "end"}])
+    run = runner.run(g, {}, run_id="voice-run")
+    assert run.status == "success", run.error
+    output = run.node_run("voice").output
+    assert run.output == "2:Serena"
+    assert [track["index"] for track in output["tracks"]] == [1, 2]
+    assert [call[1] for call in calls] == ["flow-voice-run-1", "flow-voice-run-2"]
+    assert all(media.get(track["asset_id"])["kind"] == "audio"
+               for track in output["tracks"])
+    assert all("token" not in media.get(track["asset_id"])["meta"]
+               for track in output["tracks"])
+
+
+def test_voiceover_rejects_empty_narration_without_call(monkeypatch, tmp_path):
+    called = False
+
+    def fake_tts(*args, **kwargs):
+        nonlocal called
+        called = True
+        return _wav_bytes()
+
+    monkeypatch.setattr("flow_studio.video_nodes.synthesize_wav", fake_tts)
+    runner, _, _ = _runner(tmp_path)
+    g = _video_flow([
+        _n("start", "start"),
+        _n("voice", "voiceover", shots_source=[{"index": 1, "narration": ""}]),
+        _n("end", "end"),
+    ], [{"from": "start", "to": "voice"}, {"from": "voice", "to": "end"}])
+    run = runner.run(g, {})
+    assert run.status == "failed" and "缺少 narration" in run.error
+    assert called is False
 
 
 def test_storyboard_empty_story_fails(tmp_path):
@@ -330,6 +453,109 @@ def test_merge_ratio_mismatch(tmp_path):
     assert merged["count"] == 2 and merged["duration"] > 0
 
 
+def test_subtitle_font_candidates_are_platform_specific():
+    import flow_studio.video as vmod
+
+    assert vmod._platform_subtitle_font_candidates("darwin")[0][0] == "Heiti SC"
+    assert vmod._platform_subtitle_font_candidates("linux")[0][0] == "Noto Sans CJK SC"
+    assert vmod._platform_subtitle_font_candidates("win32")[0][0] == "Microsoft YaHei"
+
+
+def test_subtitle_filter_uses_detected_cjk_font(monkeypatch, tmp_path):
+    import flow_studio.video as vmod
+
+    font_dir = tmp_path / "fonts,local"
+    font_dir.mkdir()
+    font_file = font_dir / "cjk.ttf"
+    font_file.write_bytes(b"font")
+    monkeypatch.setattr(
+        vmod, "_platform_subtitle_font_candidates",
+        lambda platform=None: [("Test CJK", font_file)])
+    subtitle_filter = vmod._subtitle_filter(tmp_path / "captions.srt")
+    assert "FontName=Test CJK" in subtitle_filter
+    assert "FontSize=22" in subtitle_filter
+    assert "fontsdir='" in subtitle_filter
+    assert "fonts\\,local" in subtitle_filter
+
+
+def test_subtitle_filter_fails_when_no_cjk_font(monkeypatch, tmp_path):
+    import flow_studio.video as vmod
+
+    monkeypatch.setattr(vmod, "_platform_subtitle_font_candidates", lambda platform=None: [])
+    monkeypatch.setattr(vmod, "_fontconfig_subtitle_font", lambda families: None)
+    with pytest.raises(RuntimeError, match="中文字幕"):
+        vmod._subtitle_filter(tmp_path / "captions.srt")
+
+
+@pytest.mark.skipif(not has_ffmpeg(), reason="需要 ffmpeg")
+def test_compose_narrated_video_has_audio_and_subtitles(tmp_path):
+    clips, voices, subtitles = [], [], []
+    for index, audio_duration in enumerate((0.45, 1.15), start=1):
+        video = tmp_path / f"clip-{index}.mp4"
+        video.write_bytes(placeholder_video_bytes(f"S{index:02d}", "16:9", 1, str(index))[0])
+        audio = tmp_path / f"voice-{index}.wav"
+        audio.write_bytes(_wav_bytes(audio_duration))
+        clips.append({"index": index, "path": str(video), "aspect_ratio": "16:9",
+                      "duration": 1})
+        voices.append({"index": index, "path": str(audio), "duration": audio_duration})
+        subtitles.append({"index": index, "text": f"第{index}段项目介绍"})
+
+    result = compose_narrated_video(
+        clips, voices, subtitles, tmp_path / "final.mp4", tmp_path / "final.srt",
+        audio_path=tmp_path / "final.wav", burn_subtitles=True)
+    assert result["count"] == 2 and result["aspect_ratio"] == "16:9"
+    assert result["duration"] == pytest.approx(sum(result["segment_durations"]), abs=0.5)
+    assert (tmp_path / "final.wav").stat().st_size > 1000
+    srt = (tmp_path / "final.srt").read_text(encoding="utf-8")
+    assert "第1段项目介绍" in srt and "第2段项目介绍" in srt
+    probe = subprocess.run([
+        "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+        "-of", "json", str(tmp_path / "final.mp4")], capture_output=True, text=True, check=True)
+    assert {stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]} == {
+        "video", "audio"}
+
+
+@pytest.mark.skipif(not has_ffmpeg(), reason="需要 ffmpeg")
+def test_video_compose_node_persists_three_assets(tmp_path):
+    runner, media, _ = _runner(tmp_path)
+    clips, tracks, subtitles = [], [], []
+    for index in (1, 2):
+        clip = media.add_bytes(
+            placeholder_video_bytes(f"S{index:02d}", "16:9", 1, str(index))[0],
+            "mp4", kind="video", meta={"aspect_ratio": "16:9"})
+        track = media.add_bytes(_wav_bytes(0.35), "wav", kind="audio")
+        clips.append({"index": index, "asset_id": clip["id"], "path": clip["path"],
+                      "duration": 1, "aspect_ratio": "16:9"})
+        tracks.append({"index": index, "asset_id": track["id"], "path": track["path"],
+                       "duration": 0.35})
+        subtitles.append({"index": index, "text": f"字幕{index}"})
+    g = _video_flow([
+        _n("start", "start"),
+        _n("compose", "video_compose", clips_source=clips, voiceovers_source=tracks,
+           subtitles_source=subtitles, title="项目介绍", burn_subtitles=False),
+        _n("end", "end", output="{{compose.count}}:{{compose.aspect_ratio}}"),
+    ], [{"from": "start", "to": "compose"}, {"from": "compose", "to": "end"}])
+    run = runner.run(g, {})
+    assert run.status == "success", run.error
+    output = run.node_run("compose").output
+    assert run.output == "2:16:9"
+    assert media.get(output["asset_id"])["kind"] == "video"
+    assert media.get(output["audio_asset_id"])["kind"] == "audio"
+    assert media.get(output["subtitle_asset_id"])["kind"] == "file"
+
+
+def test_video_compose_rejects_mismatched_indexes(tmp_path):
+    runner, _, _ = _runner(tmp_path)
+    g = _video_flow([
+        _n("start", "start"),
+        _n("compose", "video_compose", clips_source=[{"index": 1}],
+           voiceovers_source=[{"index": 2}], subtitles_source=[{"index": 1, "text": "x"}]),
+        _n("end", "end"),
+    ], [{"from": "start", "to": "compose"}, {"from": "compose", "to": "end"}])
+    run = runner.run(g, {})
+    assert run.status == "failed" and "index 不一致" in run.error
+
+
 def test_merge_without_ffmpeg_skips_when_optional(tmp_path, monkeypatch):
     """无 ffmpeg：镜头视频走 GIF 占位，合成 optional=true 时降级跳过、流程继续。"""
     import flow_studio.video as vmod
@@ -406,7 +632,9 @@ def client(config_dir, tmp_path):
 
 def test_api_video_models(client):
     cfg = client.get("/api/video/models").json()
-    assert "llm" in cfg and "image" in cfg and "video" in cfg
+    assert {"llm", "image", "video", "speech"} <= set(cfg)
+    assert cfg["speech"]["base_url"] == "http://127.0.0.1:17863"
+    assert cfg["speech"]["voice"] == "Serena"
     r = client.put("/api/video/models", json={
         "image": {"enabled": True, "base_url": "http://img", "api_key": "k",
                   "model": "m1"}})
@@ -437,7 +665,7 @@ def test_api_assets_upload_list_delete(client):
 def test_api_node_types_include_video(client):
     types = client.get("/api/node-types").json()
     assert {"storyboard", "character", "keyframe", "shot_video",
-            "merge_video", "asset"} <= set(types)
+            "merge_video", "voiceover", "video_compose", "asset"} <= set(types)
     assert types["storyboard"]["form"][0]["key"] == "story"
 
 

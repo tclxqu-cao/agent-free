@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import mimetypes
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,7 @@ class AssetStore:
         self.dir = Path(media_dir)
         self.files = self.dir / "files"
         self.files.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(self.dir / "assets.sqlite", check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("""CREATE TABLE IF NOT EXISTS assets (
@@ -51,12 +53,13 @@ class AssetStore:
         return self.add_bytes(data, Path(src).suffix, kind, name, flow_id, meta)
 
     def _insert(self, row: dict) -> None:
-        self.conn.execute(
-            "INSERT INTO assets VALUES (?,?,?,?,?,?,?,?,?)",
-            (row["id"], row["kind"], row["name"], row["path"], row["mime"],
-             row["bytes"], row["flow_id"],
-             __import__("json").dumps(row["meta"], ensure_ascii=False), row["created_at"]))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO assets VALUES (?,?,?,?,?,?,?,?,?)",
+                (row["id"], row["kind"], row["name"], row["path"], row["mime"],
+                 row["bytes"], row["flow_id"],
+                 __import__("json").dumps(row["meta"], ensure_ascii=False), row["created_at"]))
+            self.conn.commit()
 
     # ---------------------------------------------------------------- 查询
     def list(self, kind: str | None = None, flow_id: str | None = None,
@@ -70,16 +73,22 @@ class AssetStore:
             args.append(flow_id)
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         args.append(min(limit, 1000))
-        return [self.to_dict(r) for r in self.conn.execute(sql, args).fetchall()]
+        with self._lock:
+            rows = self.conn.execute(sql, args).fetchall()
+        return [self.to_dict(r) for r in rows]
 
     def get(self, asset_id: str) -> dict | None:
-        r = self.conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
+        with self._lock:
+            r = self.conn.execute("SELECT * FROM assets WHERE id=?", (asset_id,)).fetchone()
         return self.to_dict(r) if r else None
 
     def file_path(self, asset_id_or_name: str) -> Path | None:
         """按 id 或文件名解析实体文件；只允许最终文件名（防路径穿越）。"""
         if "/" in asset_id_or_name or "\\" in asset_id_or_name or ".." in asset_id_or_name:
             return None
+        direct = self.files / Path(asset_id_or_name).name
+        if direct.is_file():
+            return direct
         rec = self.get(asset_id_or_name)
         fname = rec["path"] if rec else Path(asset_id_or_name).name
         if "/" in fname or ".." in fname:
@@ -88,13 +97,14 @@ class AssetStore:
         return p if p.exists() else None
 
     def delete(self, asset_id: str) -> bool:
-        rec = self.get(asset_id)
-        if rec is None:
-            return False
-        (self.files / rec["path"]).unlink(missing_ok=True)
-        self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
-        self.conn.commit()
-        return True
+        with self._lock:
+            rec = self.get(asset_id)
+            if rec is None:
+                return False
+            (self.files / rec["path"]).unlink(missing_ok=True)
+            self.conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
+            self.conn.commit()
+            return True
 
     # ---------------------------------------------------------------- 序列化
     @staticmethod
