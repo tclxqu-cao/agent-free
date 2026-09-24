@@ -155,11 +155,23 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
         config, _, db = _ctx(args)
         from job_agent.sites import scrape_all
 
+        city = str((config.get("home") or {}).get("city") or "")
+        if city and not bool(args.get("force")):
+            import datetime as dt
+
+            row = db.query(
+                "SELECT COUNT(*) AS count FROM jobs WHERE last_seen=? "
+                "AND city LIKE ? AND site NOT LIKE 'demo%'",
+                (dt.date.today().isoformat(), f"%{city}%"))
+            cached_count = int(row[0]["count"]) if row else 0
+            if cached_count:
+                return {"city": city, "total_jobs": cached_count, "errors": [],
+                        "cached": True,
+                        "text": f"复用{city}今日已抓取的 {cached_count} 条岗位"}
         stats = scrape_all(config, config_dir, db,
                            sites=[args["site"]] if args.get("site") else None)
-        city = str((config.get("home") or {}).get("city") or "")
         return {"city": city, "total_jobs": stats.get("total_jobs"),
-                "errors": stats.get("errors", []),
+                "errors": stats.get("errors", []), "cached": False,
                 "text": f"{city} 抓取入库 {stats.get('total_jobs') or 0} 条"}
 
     def analyze(args: dict) -> dict:
@@ -240,7 +252,9 @@ def register_job_agent(registry: AgentRegistry, config_dir: Path) -> bool:
     registry.register("job_agent", "scrape", scrape,
                       "对启用站点抓取一次并入库（需登录态）",
                       [{"key": "site", "type": "string", "required": False,
-                        "description": "只抓该站点，默认全部启用站点"}, city_param])
+                        "description": "只抓该站点，默认全部启用站点"}, city_param,
+                       {"key": "force", "type": "bool", "required": False,
+                        "description": "忽略同城市当日缓存并强制抓取"}])
     registry.register("job_agent", "analyze", analyze,
                       "岗位数量 / 薪资 / 技能热度趋势与热度增量",
                       [{"key": "days", "type": "number", "required": False,

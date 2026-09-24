@@ -527,7 +527,7 @@ class AgentRuntime:
                 }, on_event=observe)
             if (requested_skill.startswith("portfolio-")
                     or requested_skill == "homepage-orchestrator"):
-                from .homepage_artifacts import validate_artifact
+                from .homepage_artifacts import job_result_artifact, validate_artifact
                 try:
                     artifact = validate_artifact(
                         json.loads(external.get("text") or "", strict=False),
@@ -535,8 +535,14 @@ class AgentRuntime:
                          if requested_skill.startswith("portfolio-")
                          else None))
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise RuntimeError(
-                        "主页智能体没有返回有效内容对象") from exc
+                    job_result = (context or {}).get("jobResult")
+                    if (requested_skill == "homepage-orchestrator"
+                            and isinstance(job_result, dict)):
+                        log.warning("主页智能体岗位制品无效，使用 Flow 结构化结果渲染")
+                        artifact = job_result_artifact(job_result)
+                    else:
+                        raise RuntimeError(
+                            "主页智能体没有返回有效内容对象") from exc
                 external["artifact"] = artifact
                 external["text"] = json.dumps(artifact, ensure_ascii=False)
             log.info("Customer Agent 运行完成：run_id=%s", external.get("run_id"))

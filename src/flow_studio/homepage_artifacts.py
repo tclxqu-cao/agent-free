@@ -6,6 +6,7 @@ import json
 import os
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -87,6 +88,63 @@ def validate_artifact(value: object, expected_skill: str | None = None) -> dict:
         clean_blocks.append(clean_block)
     return {**value, "schemaVersion": 1, "skill": actual_skill,
             "title": title, "blocks": clean_blocks}
+
+
+def job_result_artifact(value: object) -> dict:
+    """Render verified Flow job output when the presentation model breaks contract."""
+    result = value if isinstance(value, dict) else {}
+    city = str(result.get("city") or "").strip() or "目标城市"
+    jobs = [job for job in result.get("jobs") or [] if isinstance(job, dict)][:20]
+    blocks = [{
+        "type": "text",
+        "tone": "lead",
+        "text": (f"{city}岗位搜索完成，城市内在招 {int(result.get('total') or 0)} 个，"
+                 f"按当前规则命中 {int(result.get('passed_count') or len(jobs))} 个。"),
+    }]
+    if not jobs:
+        blocks.append({
+            "type": "text",
+            "text": "本次没有匹配到满足当前条件的岗位，可以调整薪资、经验或距离要求后重试。",
+        })
+    for index, job in enumerate(jobs, 1):
+        heading = " · ".join(item for item in (
+            str(job.get("title") or "未命名岗位").strip(),
+            str(job.get("company") or "公司未公开").strip(),
+            str(job.get("salary_text") or "薪资面议").strip(),
+        ) if item)
+        meta = " / ".join(item for item in (
+            str(job.get("city") or city).strip(),
+            str(job.get("district") or "").strip(),
+            str(job.get("experience_text") or "经验不限").strip(),
+            str(job.get("education") or "学历不限").strip(),
+        ) if item)
+        lines = [f"{index}. {heading}", meta]
+        responsibilities = [str(item).strip() for item in
+                            job.get("responsibilities") or [] if str(item).strip()]
+        requirements = [str(item).strip() for item in
+                        job.get("requirements") or [] if str(item).strip()]
+        if responsibilities:
+            lines.append("职责：" + "；".join(responsibilities[:3]))
+        if requirements:
+            lines.append("要求：" + "；".join(requirements[:4]))
+        reasons = [str(item).strip() for item in
+                   job.get("reasons") or [] if str(item).strip()]
+        if reasons:
+            lines.append("匹配：" + "；".join(reasons[:3]))
+        url = str(job.get("url") or "").strip()
+        if re.match(r"^https?://", url, re.I):
+            lines.append("详情：" + url)
+        blocks.append({"type": "text", "text": "\n".join(lines)})
+    return validate_artifact({
+        "schemaVersion": 1,
+        "skill": "portfolio-jobs",
+        "title": f"{city}岗位",
+        "blocks": blocks,
+        "suggestions": ["/jobs"],
+        "sources": [str(job.get("url")) for job in jobs
+                    if re.match(r"^https?://", str(job.get("url") or ""), re.I)][:12],
+        "generatedAt": datetime.now(UTC).isoformat(),
+    }, "portfolio-jobs")
 
 
 def _safe_url(value: str) -> bool:

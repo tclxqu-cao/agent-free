@@ -300,6 +300,33 @@ def test_job_request_runs_real_flow_with_chengdu_and_excludes_other_cities(homep
     assert db_path.read_bytes() == before
 
 
+def test_job_request_uses_verified_result_when_agent_returns_invalid_json(homepage):
+    client, service = homepage
+    db = DB(service.studio.config_dir.parent / "data" / "job_agent.db")
+    db.upsert_job(Job(
+        site="job51", title="Java开发工程师", company="成都测试公司",
+        city="成都", district="武侯区", salary_text="25-35K",
+        experience_text="5-10年", education="本科",
+        url="https://jobs.51job.com/chengdu/162453184.html",
+        responsibilities=["负责核心系统研发"],
+        requirements_extra=["熟悉 Java 和 Spring Boot"],
+    ), 8, dt.date.today().isoformat())
+    db.close()
+    FakeHomepageProvider.raw_reply = "这不是合法的制品 JSON"
+
+    response = client.post("/api/homepage/command", json={
+        "message": "job去搜索成都的"})
+
+    assert response.status_code == 200, response.text
+    artifact = response.json()
+    assert artifact["skill"] == "portfolio-jobs"
+    rendered = "\n".join(block.get("text", "") for block in artifact["blocks"])
+    assert "成都岗位搜索完成" in rendered
+    assert "Java开发工程师" in rendered
+    assert "熟悉 Java 和 Spring Boot" in rendered
+    assert service.legacy_runs.get(artifact["run_id"])["status"] == "success"
+
+
 def test_unsafe_graph_edits_fail_closed_even_when_cache_exists(homepage):
     client, service = homepage
     assert client.post("/api/homepage/command", json={"message": "/works"}).status_code == 200

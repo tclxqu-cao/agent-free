@@ -156,15 +156,21 @@ def test_match_today_action_direct(config_dir):
 
 
 def test_job_actions_apply_request_city_without_mutating_config(config_dir, monkeypatch):
+    import datetime as dt
+
     from flow_studio.adapters import register_job_agent
     from flow_studio.registry import AgentRegistry
     from job_agent.distance import DISTRICTS
-    from job_agent.models import load_config
+    from job_agent.models import Job, load_config
 
-    seen = {}
+    seen = {"calls": 0}
 
-    def fake_scrape(config, _config_dir, _db, sites=None):
-        seen.update(config=config, sites=sites)
+    def fake_scrape(config, _config_dir, db, sites=None):
+        seen.update(config=config, sites=sites, calls=seen["calls"] + 1)
+        db.upsert_job(Job(site="boss", title="Java", company="Example",
+                          city=config["home"]["city"],
+                          url="https://example.org/chengdu"),
+                      3, dt.date.today().isoformat())
         return {"total_jobs": 3, "errors": []}
 
     monkeypatch.setattr("job_agent.sites.scrape_all", fake_scrape)
@@ -173,10 +179,14 @@ def test_job_actions_apply_request_city_without_mutating_config(config_dir, monk
 
     resolved = reg.get("job_agent", "resolve_city").fn({
         "message": "job去搜索成都的"})
-    scraped = reg.get("job_agent", "scrape").fn({"city": resolved["city"]})
+    scrape = reg.get("job_agent", "scrape").fn
+    scraped = scrape({"city": resolved["city"]})
+    cached = scrape({"city": resolved["city"]})
 
     assert resolved["city"] == "成都"
     assert scraped["city"] == "成都"
+    assert scraped["cached"] is False
+    assert cached["cached"] is True and seen["calls"] == 1
     assert seen["config"]["home"] == {
         "city": "成都", "district": "", "lat": DISTRICTS["成都"]["__city__"][0],
         "lng": DISTRICTS["成都"]["__city__"][1],

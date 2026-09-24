@@ -1,5 +1,7 @@
 """站点适配器纯函数解析测试（parse_card_dict，用真实格式样例 dict）。"""
 
+import json
+
 import pytest
 
 from job_agent.sites import REGISTRY, get_site
@@ -78,6 +80,79 @@ def test_search_link_city_param():
     assert "city=101210400" in site.search_link("Java")
     site2 = get_site("boss", None)
     assert "city=" not in site2.search_link("Java")
+
+
+def test_job51_extracts_current_card_contract(monkeypatch):
+    class Node:
+        def __init__(self, text="", attrs=None):
+            self.text = text
+            self.attrs = attrs or {}
+
+        def inner_text(self):
+            return self.text
+
+        def get_attribute(self, name):
+            return self.attrs.get(name)
+
+    class Card:
+        nodes = {
+            ".joblist-item-job": Node(attrs={"sensorsdata": json.dumps({
+                "jobId": "162453184", "jobTitle": "Java开发工程师",
+                "jobSalary": "20-40万/年", "jobArea": "成都",
+                "jobYear": "5年及以上", "jobDegree": "本科",
+                "jobTime": "2026-09-24 10:00:00",
+            }, ensure_ascii=False)}),
+            ".jname, .jobname, .t span.jname at": Node("错误标题"),
+            ".area .shrink-0": Node("成都·武侯区"),
+            ".cname": Node("测试公司"),
+        }
+
+        def query_selector(self, selector):
+            return self.nodes.get(selector)
+
+        def query_selector_all(self, selector):
+            if selector == ".bc .dc, .introduction span":
+                return [Node("计算机软件"), Node("1000-5000人")]
+            if selector == ".joblist-item-job .tag, .tag":
+                return [Node("Java"), Node("Spring Boot")]
+            return []
+
+    class Page:
+        def goto(self, *_args, **_kwargs):
+            return None
+
+        def wait_for_timeout(self, *_args):
+            return None
+
+        def query_selector_all(self, selector):
+            return [Card()] if selector == ".joblist-item, div.j_joblist .e" else []
+
+        def query_selector(self, _selector):
+            return None
+
+    site = get_site("job51", "成都")
+    monkeypatch.setattr(site, "dismiss_popups", lambda _page: None)
+    monkeypatch.setattr(site, "scroll_feed", lambda _page, times: None)
+
+    cards, total = site.extract(Page(), "Java", 10)
+
+    assert total is None
+    assert cards == [{
+        "title": "Java开发工程师",
+        "url": "https://jobs.51job.com/chengdu/162453184.html",
+        "salary": "20-40万/年",
+        "experience": "5年及以上",
+        "education": "本科",
+        "city_text": "成都·武侯区",
+        "company": "测试公司",
+        "company_size": "1000-5000人",
+        "requirements": "Java\nSpring Boot",
+        "posted": "2026-09-24 10:00:00",
+    }]
+
+    job = site.parse_card_dict(cards[0])
+    assert (job.city, job.district) == ("成都", "武侯区")
+    assert job.requirements_extra == ["Java", "Spring Boot"]
 
 
 class TestParseCards:
