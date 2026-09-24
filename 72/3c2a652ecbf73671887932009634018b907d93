@@ -1,0 +1,35 @@
+src/flow_studio/homepage_artifacts.py
+  s_0b7ae78449458f::t_5add31ea62243b 9,93-147
+  s_0b7ae78449458f::t_cde62a206c765a 148-149
+src/flow_studio/adapters.py
+  s_0b7ae78449458f::t_41ffba63f399be 158-170,174,255-257
+tests/test_sites.py
+  s_0b7ae78449458f::t_db5d7176e8b902 106,116-117,146,149,152-155
+  s_0b7ae78449458f::t_5add31ea62243b 3-4,85-105,107-115,118-145,147-148,150-151
+  s_0b7ae78449458f::t_3599b93f4ffd1a 156-157
+src/flow_studio/agentrt.py
+  s_0b7ae78449458f::t_5add31ea62243b 530,538-545
+tests/test_homepage_flow.py
+  s_0b7ae78449458f::t_5add31ea62243b 303-329
+src/job_agent/sites/job51.py
+  s_0b7ae78449458f::t_db5d7176e8b902 68-72,84-85,100-102
+  s_0b7ae78449458f::t_5add31ea62243b 5-6,21-27,29-30,33,35,38-60,81,86-88,90-97,103
+tests/test_flow_builtin.py
+  s_0b7ae78449458f::t_58524ea0ac6499 159-160,164,166,168-173,182-184,188-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "723c2a652ecbf73671887932009634018b907d93",
+  "prompts": {},
+  "sessions": {
+    "s_0b7ae78449458f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c83e-853b-7bb0-9e86-8c1ea79b5d36",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
