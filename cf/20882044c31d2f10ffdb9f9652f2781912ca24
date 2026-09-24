@@ -1,0 +1,22 @@
+docs/superpowers/specs/2026-09-24-homepage-orchestrator-skill-design.md
+  s_bd20ce99e6a8be::t_0a4337d2a9b3f1 1-19,21-22,27-55,58-76,82-115,117-118,137-179,185-196
+  s_bd20ce99e6a8be::t_01b806c375254e 20,23-26,56,77-81,119-122,124,127-136,180-184
+  s_bd20ce99e6a8be::t_c05c3db2dff827 57,116,123,125
+  s_bd20ce99e6a8be::t_1f8a249a6bb714 126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cf20882044c31d2f10ffdb9f9652f2781912ca24",
+  "prompts": {},
+  "sessions": {
+    "s_bd20ce99e6a8be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ce6b-091e-7092-a41f-005b854af272",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}
