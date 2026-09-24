@@ -1,0 +1,79 @@
+docs/superpowers/plans/2026-09-23-homepage-visible-routing.md
+  s_3f2565b4f84945::t_3ce5fc5ea08db1 38,42,46,50,54
+  s_3f2565b4f84945::t_d3dfc814dda402 97,101,105,109,113,117
+  s_3f2565b4f84945::t_e6cfb239a8549d 69,73,77,81
+  s_3f2565b4f84945::t_d30b7298a6bd64 123
+  s_3f2565b4f84945::t_5485b374d89796 1-37,39-41,43-45,47-49,51-53,55-68,70-72,74-76,78-80,82-96,98-100,102-104,106-108,110-112,114-116,118-122,124-131
+docs/superpowers/plans/2026-09-22-portfolio-skill-content-flow.md
+  s_3f2565b4f84945::t_c533d4f2d315db 100,104,108,112,134,138,142,146,150,154,158,162,183,187,191,195,199,203,207,222,226,230,234,238,248
+  s_0fe2d788591c4c::t_67a58618cb79da 1-4,6,8,10-12,23-25,27-28,30,36-37,95,113,115,118-120,125-126,129-130,143,145,147,168-172,175,178-179,194,196,198,213-214,217-218,221,223,225,227,245-247,249-252,256-257
+  s_3f2565b4f84945::t_0c924083c8e5cd 5,7,9,13-22,26,29,31-35,38-40,42-57,59-61,63-65,67-80,82-84,86-94,96-99,101-103,105-107,109-111,114,116-117,121-124,127-128,131-133,135-137,139-141,144,148-149,151-153,155-157,159-161,163-167,173-174,176-177,180-182,184-186,188-190,192-193,197,200-202,204-206,208-212,215-216,219-220,224,228-229,231-233,235-237,239-241,243-244,253-255,258
+  s_3f2565b4f84945::t_79a74e9c327dd3 41,58,62,66,81,85
+  s_3f2565b4f84945::t_daa29d1820e49f 242
+docs/superpowers/plans/2026-09-24-ca-agent-identity-instructions.md
+  s_3f2565b4f84945::t_69bf155b891d00 31,35,54,68,72,76,89,95
+  s_3f2565b4f84945::t_32e2428ee2d6ba 39,47-48
+  s_3f2565b4f84945::t_d10e45713779da 1-30,32-34,36-38,40-46,49-53,55-67,69-71,73-75,77-88,90-94,96-101
+docs/superpowers/plans/2026-09-24-homepage-chinese-labels-and-works-media.md
+  s_bd20ce99e6a8be::t_9ed805c20fb5e1 1-23,25-27,33-35,42-76
+  s_bd20ce99e6a8be::t_f0e32414506f41 37-41
+  s_bd20ce99e6a8be::t_abb2506feebdc6 24,28-32,36
+.gitignore
+  s_3f2565b4f84945::t_4172cc9acced78 18
+src/flow_studio/README.md
+  s_0b7ae78449458f::t_4d65773ef6a98a 94,103-104,108-112,121-125,129
+  s_0b7ae78449458f::t_c248e2baae276f 14
+  s_0b7ae78449458f::t_f1d48d68991a5e 113-115
+  s_3f2565b4f84945::t_21ab4fe6dbbbc1 150-153
+  s_3f2565b4f84945::t_bf040092b8b23a 154
+docs/superpowers/specs/2026-09-23-homepage-visible-routing-design.md
+  s_3f2565b4f84945::t_5485b374d89796 1-44
+docs/superpowers/plans/2026-09-23-flow-external-agent-protocol.md
+  s_0b7ae78449458f::t_cebadf4ca89df9 1-295
+docs/superpowers/plans/2026-09-24-homepage-orchestrator-skill.md
+  s_bd20ce99e6a8be::t_fdfc8e2a7bb8ca 1-34,36-38,40-42,44-46,48-50,52-69,71-73,75-77,79-81,83-85,87-104,106-108,110-112,114-116,118-120,122-133,135-137,139-141,143-145,147-149,151-155,157-164
+  s_bd20ce99e6a8be::t_ae779d6d7dd64e 142,146,150,156
+  s_bd20ce99e6a8be::t_1afe2a4e0827f4 35,39,43,47,51,70,74,78,82,86,105,109,113,117,121,134,138
+docs/superpowers/plans/2026-09-23-project-intro-video-voiceover.md
+  s_0b7ae78449458f::t_7fb895f44158de 1-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "38bdbaefdc4ce85ca91b36bb0e62448f4ba06aa0",
+  "prompts": {},
+  "sessions": {
+    "s_0b7ae78449458f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c83e-853b-7bb0-9e86-8c1ea79b5d36",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    },
+    "s_0fe2d788591c4c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c94a-bb9b-7fe2-92ea-d371352bd1b4",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    },
+    "s_3f2565b4f84945": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c871-5134-7792-931a-669b4a91cd7c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    },
+    "s_bd20ce99e6a8be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ce6b-091e-7092-a41f-005b854af272",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
