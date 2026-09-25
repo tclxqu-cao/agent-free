@@ -75,7 +75,7 @@ def validate_artifact(value: object, expected_skill: str | None = None) -> dict:
             if not _safe_url(src):
                 raise ValueError("Portfolio artifact 媒体地址无效")
         elif kind == "html":
-            html = str(block.get("html") or "")
+            html = str(block.get("html") or block.get("text") or "")
             if (not html or len(html) > 80_000
                     or re.search(r"<\s*(?:script|iframe|object|embed|form|style|link|meta)\b|\son\w+\s*=|javascript:", html, re.I)):
                 raise ValueError("Portfolio artifact HTML 无效")
@@ -85,6 +85,9 @@ def validate_artifact(value: object, expected_skill: str | None = None) -> dict:
         if kind in {"image", "video"}:
             clean_block["src"] = src
             clean_block.pop("url", None)
+        elif kind == "html":
+            clean_block["html"] = html
+            clean_block.pop("text", None)
         clean_blocks.append(clean_block)
     return {**value, "schemaVersion": 1, "skill": actual_skill,
             "title": title, "blocks": clean_blocks}

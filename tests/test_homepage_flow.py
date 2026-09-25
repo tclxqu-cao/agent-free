@@ -417,3 +417,28 @@ def test_artifact_normalizes_model_media_url_alias():
     assert artifact["blocks"][0]["src"] == "/assets/work-flow.mp4"
     assert artifact["blocks"][1]["src"] == "assets/work-flow.jpg"
     assert all("url" not in block for block in artifact["blocks"])
+
+
+def test_artifact_normalizes_model_html_text_alias_without_weakening_safety():
+    artifact = validate_artifact({
+        "schemaVersion": 1,
+        "skill": "portfolio-chat",
+        "title": "项目介绍",
+        "blocks": [{
+            "type": "html",
+            "text": "<div class='artifact-panel'><p>Flow Studio</p></div>",
+        }],
+    })
+
+    assert artifact["blocks"] == [{
+        "type": "html",
+        "html": "<div class='artifact-panel'><p>Flow Studio</p></div>",
+    }]
+
+    with pytest.raises(ValueError, match="HTML 无效"):
+        validate_artifact({
+            "schemaVersion": 1,
+            "skill": "portfolio-chat",
+            "title": "不安全内容",
+            "blocks": [{"type": "html", "text": "<script>alert(1)</script>"}],
+        })
