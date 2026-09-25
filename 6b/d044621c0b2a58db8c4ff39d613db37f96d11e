@@ -1,0 +1,26 @@
+docs/superpowers/specs/2026-09-25-homepage-html-block-alias-design.md
+  s_3f2565b4f84945::t_b8bc370ce8bf61 1-27
+docs/superpowers/plans/2026-09-25-homepage-html-block-alias.md
+  s_3f2565b4f84945::t_af61ce909500d0 29,33,46,52
+  s_3f2565b4f84945::t_b8bc370ce8bf61 1-28,30-32,34-45,47-51,53-55
+src/flow_studio/homepage_artifacts.py
+  s_3f2565b4f84945::t_4ed3b8a8920720 78,88-90
+tests/test_homepage_flow.py
+  s_3f2565b4f84945::t_4ed3b8a8920720 420-444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6bd044621c0b2a58db8c4ff39d613db37f96d11e",
+  "prompts": {},
+  "sessions": {
+    "s_3f2565b4f84945": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c871-5134-7792-931a-669b4a91cd7c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
