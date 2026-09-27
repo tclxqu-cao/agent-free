@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-09-27-digital-human-mobile-realism-design.md
+  s_868f6333240ed9::t_c5b78982832b05 1-167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2be41127b42e5363b3564266b6320e4912829725",
+  "prompts": {},
+  "sessions": {
+    "s_868f6333240ed9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e087-505b-7022-a67d-d4d0dd676c61",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
