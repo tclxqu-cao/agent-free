@@ -1,0 +1,44 @@
+docs/superpowers/specs/2026-09-21-flow-studio-digital-workforce-design.md
+  h_86bb4e0e04237b 1-177
+docs/superpowers/specs/2026-09-24-digital-human-stage-design.md
+  h_86bb4e0e04237b 1-73
+src/flow_studio/agentrt.py
+  h_86bb4e0e04237b 484-501,536,539-540
+src/flow_studio/board.py
+  h_86bb4e0e04237b 1-278
+src/flow_studio/bus.py
+  h_86bb4e0e04237b 1-239
+src/flow_studio/crew.py
+  h_86bb4e0e04237b 1-827
+src/flow_studio/governance.py
+  h_86bb4e0e04237b 45-55
+src/flow_studio/policy.py
+  h_86bb4e0e04237b 42-46,59,62-75,87-88,157-187
+src/flow_studio/server.py
+  h_86bb4e0e04237b 19-21,35,119-128,145-153,209-210,216-217,534-536,1199-1515
+src/flow_studio/web/app.js
+  h_86bb4e0e04237b 163-164,169-170,2407-3376,3380,3385,3388,3391,3394,3400
+src/flow_studio/web/index.html
+  h_86bb4e0e04237b 13,32,144-208
+src/flow_studio/web/style.css
+  h_86bb4e0e04237b 852-1072
+src/flow_studio/workforce.py
+  h_86bb4e0e04237b 1-551
+src/flow_studio/workspace.py
+  h_86bb4e0e04237b 17,19-20,35,51,92-98,108-111,228,237
+tests/test_flow_server.py
+  h_86bb4e0e04237b 93-118
+tests/test_flow_workforce.py
+  h_86bb4e0e04237b 1-1999
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5f23d3f771bf4aec79664cafcaba68b41036f91b",
+  "prompts": {},
+  "humans": {
+    "h_86bb4e0e04237b": {
+      "author": "caoqu <qu.cao@ly.com>"
+    }
+  }
+}
