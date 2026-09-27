@@ -9,6 +9,7 @@ body 参数识别成 query 参数。项目要求 Python ≥3.11，原生支持 `
 import argparse
 import logging
 import os
+import re
 import secrets
 import uuid
 import webbrowser
@@ -39,6 +40,9 @@ from .homepage import HomepageService
 log = logging.getLogger("flow_studio")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+DIGITAL_HUMAN_ASSET_DIR = WEB_DIR / "assets" / "digital-humans"
+DIGITAL_HUMAN_ASSET_RE = re.compile(
+    r"^employee-(?:0[1-6])-(?:seated|standing)\.webp$")
 DEFAULT_PORT = 8788
 
 
@@ -643,6 +647,19 @@ def create_app(config_dir: Path = Path("config"),
     def app_js():
         return FileResponse(WEB_DIR / "app.js", media_type="text/javascript",
                             headers={"Cache-Control": "no-cache"})
+
+    @app.get("/assets/digital-humans/{filename}")
+    def digital_human_asset(filename: str):
+        if not DIGITAL_HUMAN_ASSET_RE.fullmatch(filename):
+            raise HTTPException(404, "数字人素材不存在")
+        asset = DIGITAL_HUMAN_ASSET_DIR / filename
+        if not asset.is_file():
+            raise HTTPException(404, "数字人素材不存在")
+        return FileResponse(
+            asset,
+            media_type="image/webp",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     @app.get("/api/health")
     def health():

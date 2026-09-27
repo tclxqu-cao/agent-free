@@ -48,6 +48,8 @@ const $$ = (q, el = document) => [...el.querySelectorAll(q)];
 const world = $("#world"), edgesSvg = $("#edges"), wrap = $("#canvas-wrap");
 const nodeEls = new Map();      // 节点 id → DOM（视口内才建）
 const edgeEls = new Map();      // 边 key → {g, path, text}
+const runtimeNodeEls = new Map();
+const runtimeEdgeEls = new Map();
 const heightCache = new Map();  // 节点 id → 高度（避免拖动时读 DOM）
 const svgNS = "http://www.w3.org/2000/svg";
 
@@ -655,6 +657,7 @@ function renderWorld() {
   nodeEls.clear();
   updateVisibility();
   renderEdges();
+  renderRuntimeProjection();
   applyView();
   highlightRun();
   syncSelection();
@@ -909,6 +912,7 @@ world.addEventListener("pointerdown", e => {
   if (e.button !== 0 || pinch || activePtrs.size > 1) return;
   const nodeEl = e.target.closest(".node");
   if (!nodeEl) return;
+  if (nodeEl.classList.contains("runtime-node")) return;
   if (e.target.closest(".port.out") || e.target.closest(".del")) return;
   const n = nodeById(nodeEl.dataset.id);
   drag = { mode: "node", pointerId: e.pointerId, id: n.id, sx: e.clientX, sy: e.clientY,
@@ -1831,7 +1835,8 @@ function fmtJson(v) { try { return JSON.stringify(v, null, 2); } catch { return 
 
 /* ================= 持久运行与增量日志 ================= */
 const RUN_STATUS = { queued: "排队中", pending: "等待", running: "运行中", success: "成功",
-  failed: "失败", skipped: "跳过 / 降级", interrupted: "已中断" };
+  completed: "已完成", failed: "失败", cancelled: "已取消",
+  skipped: "跳过 / 降级", interrupted: "已中断" };
 const terminalRun = run => ["success", "failed", "interrupted"].includes(run?.status);
 function runScope() { return `${state.me?.user?.user_id || ""}:${state.workspaceId}`; }
 function runStorageKey() { return `flow-studio-active-run:${runScope()}`; }
@@ -1852,6 +1857,114 @@ function runMatchesCanvas() {
     type: n.type, label: n.label, params: n.params || {} })), edges: (g.edges || []).map(e =>
     ({ from: e.from, to: e.to, branch: e.branch || "" })) });
   return shape(run.graph) === shape(graph);
+}
+
+function dynamicRuntimeId(flowNodeId, agentId) {
+  return `runtime:${flowNodeId}:${agentId}`;
+}
+
+function dynamicTeamProjection(run, events = []) {
+  const byRuntimeId = new Map();
+  const snapshots = [];
+  const upsert = (flowNodeId, data = {}) => {
+    const agentId = String(data.agentId || "").trim();
+    if (!flowNodeId || !agentId) return null;
+    const id = dynamicRuntimeId(flowNodeId, agentId);
+    const existing = byRuntimeId.get(id) || {
+      id, flowNodeId, agentId, sessionId: "", parentSessionId: "",
+      name: agentId, role: "", task: "", status: "queued", progress: "",
+      toolName: "", summary: "", error: "", durationMs: null,
+    };
+    const merged = { ...existing };
+    for (const key of ["sessionId", "parentSessionId", "name", "role", "task",
+      "status", "progress", "phase", "toolName", "summary", "error", "code",
+      "startedAt", "durationMs"])
+      if (data[key] !== undefined && data[key] !== "") merged[key] = data[key];
+    byRuntimeId.set(id, merged);
+    return merged;
+  };
+  for (const nodeRun of run?.node_runs || []) {
+    const snapshot = nodeRun.output?.dynamicTeamSnapshot;
+    for (const agent of snapshot?.agents || []) {
+      snapshots.push([nodeRun.node_id, agent]);
+      upsert(nodeRun.node_id, agent);
+    }
+  }
+  for (const event of events || []) {
+    if (!String(event.type || "").startsWith("agent.")) continue;
+    const agent = upsert(event.node_id, event);
+    if (!agent) continue;
+    if (event.type === "agent.started") agent.status = "running";
+    else if (event.type === "agent.progress") {
+      agent.status = "running"; agent.progress = event.message || event.text || "";
+    } else if (event.type === "agent.completed") {
+      agent.status = "completed"; agent.summary = event.summary || event.message || "";
+    } else if (event.type === "agent.failed") {
+      agent.status = ["PARENT_CANCELLED", "RUN_CANCELLED"].includes(event.code)
+        ? "cancelled" : "failed";
+      agent.error = event.message || "";
+    }
+  }
+  if (terminalRun(run)) {
+    for (const [flowNodeId, agent] of snapshots) upsert(flowNodeId, agent);
+  }
+  const counters = new Map();
+  const nodes = [...byRuntimeId.values()].map(agent => {
+    const index = counters.get(agent.flowNodeId) || 0;
+    counters.set(agent.flowNodeId, index + 1);
+    const parent = run?.graph?.nodes?.find(node => node.id === agent.flowNodeId);
+    const col = index % 2, row = Math.floor(index / 2);
+    return { ...agent, type: "runtime_agent", label: agent.name || agent.agentId,
+      pos: { x: Number(parent?.pos?.x || 0) + 300 + col * 252,
+             y: Number(parent?.pos?.y || 0) + row * 102 } };
+  });
+  nodes.forEach(node => byRuntimeId.set(node.id, node));
+  const edges = nodes.map(node => ({ from: node.flowNodeId, to: node.id,
+    runtime: true, branch: "派生" }));
+  return { nodes, edges, byRuntimeId };
+}
+
+function dynamicDisplayGraph(run, events = []) {
+  const projection = dynamicTeamProjection(run, events);
+  return {
+    nodes: [...(run?.graph?.nodes || []), ...projection.nodes],
+    edges: [...(run?.graph?.edges || []), ...projection.edges],
+    projection,
+  };
+}
+
+function clearRuntimeProjection() {
+  for (const el of runtimeNodeEls.values()) el.remove();
+  for (const el of runtimeEdgeEls.values()) el.remove();
+  runtimeNodeEls.clear(); runtimeEdgeEls.clear();
+}
+
+function renderRuntimeProjection() {
+  clearRuntimeProjection();
+  if (!runMatchesCanvas()) return;
+  const projection = dynamicTeamProjection(state.lastRun, state.runMonitor.events);
+  for (const edge of projection.edges) {
+    const fromNode = nodeById(edge.from), toNode = projection.byRuntimeId.get(edge.to);
+    if (!fromNode || !toNode) continue;
+    const a = portPos(fromNode, "out");
+    const b = { x: toNode.pos.x, y: toNode.pos.y + 34 };
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("class", "edge runtime-edge"); path.setAttribute("d", edgeD(a, b));
+    edgesSvg.appendChild(path); runtimeEdgeEls.set(edge.to, path);
+  }
+  for (const node of projection.nodes) {
+    const el = document.createElement("div");
+    el.className = `node runtime-node st-${node.status || "queued"}`;
+    el.dataset.runtimeId = node.id;
+    el.style.left = `${node.pos.x}px`; el.style.top = `${node.pos.y}px`;
+    el.innerHTML = `<div class="type-dot"></div><div class="node-head">
+      <span class="ico-chip">◎</span><span class="title">${esc(node.label)}</span>
+      <span class="runtime-tag">临时</span></div>
+      <div class="node-sub" title="${esc(node.role || node.task)}">${esc(node.role || node.task || "临时成员")}</div>
+      <span class="run-badge">${esc(RUN_STATUS[node.status] || node.status)}</span>`;
+    el.onclick = event => { event.stopPropagation(); showRuntimeAgent(node.id); };
+    world.appendChild(el); runtimeNodeEls.set(node.id, el);
+  }
 }
 function tracebackHtml(value) {
   return value ? `<details class="run-traceback"><summary>完整异常堆栈</summary><pre>${esc(value)}</pre></details>` : "";
@@ -1888,6 +2001,7 @@ function stopRunTracking(clear = false) {
     $("#rp-list").replaceChildren(); $("#rp-logs").replaceChildren();
     $("#rp-output").replaceChildren(); $("#run-status").textContent = "";
     if ($("#modal").dataset.runView) closeModal();
+    clearRuntimeProjection();
     highlightRun(); updateRunControls();
   }
 }
@@ -1914,22 +2028,31 @@ function renderRunPanel(run) {
   $("#rp-version-note").textContent = !run.graph ? "历史记录未保存执行图，仅展示记录中的节点状态。"
     : runMatchesCanvas() ? "状态来自本次执行图；点击节点查看本次输入输出。"
     : "本次执行图与当前画布不同；请打开「执行图快照」查看实际运行节点。";
+  const team = dynamicTeamProjection(run, state.runMonitor.events);
+  const children = new Map();
+  for (const child of team.nodes) children.set(child.flowNodeId,
+    [...(children.get(child.flowNodeId) || []), child]);
   const html = (run.node_runs || []).map(r => `<button class="rp-row" data-node="${esc(r.node_id)}">
     <span class="st" data-status="${esc(r.status)}">${esc(RUN_STATUS[r.status] || r.status)}</span>
     <b>${esc(r.label || r.node_id)}</b><span class="errmsg">${esc(r.error || "")}</span>
-    <span class="ms">${r.status === "running" ? "执行中" : r.ms == null ? "" : `${r.ms}ms`}</span></button>`).join("")
+    <span class="ms">${r.status === "running" ? "执行中" : r.ms == null ? "" : `${r.ms}ms`}</span></button>`
+    + (children.get(r.node_id) || []).map(child => `<button class="rp-row runtime-row" data-runtime="${esc(child.id)}">
+      <span class="st" data-status="${esc(child.status)}">${esc(RUN_STATUS[child.status] || child.status)}</span>
+      <b>${esc(child.name || child.agentId)}</b><span class="errmsg">${esc(child.role || child.error || "临时成员")}</span>
+      <span class="ms">${child.status === "running" ? "执行中" : child.durationMs == null ? "" : `${child.durationMs}ms`}</span></button>`).join("")).join("")
     || '<div class="run-empty">等待节点开始执行…</div>';
   // 无变化时保留焦点，滚动位置与展开的堆栈。
   if ($("#rp-list").innerHTML !== html) {
     $("#rp-list").innerHTML = html;
     $$("#rp-list [data-node]").forEach(row => row.onclick = () => showRunNode(row.dataset.node));
+    $$("#rp-list [data-runtime]").forEach(row => row.onclick = () => showRuntimeAgent(row.dataset.runtime));
   }
   const output = `${run.error ? `<div class="run-error">${esc(run.error)}</div>` : ""}${tracebackHtml(run.traceback)}
     ${mediaGridFromOutput(run.output)}<pre class="json-view">${esc(fmtJson(run.output) ?? "暂无输出")}</pre>`;
   if ($("#rp-output").dataset.value !== output) {
     $("#rp-output").innerHTML = output; $("#rp-output").dataset.value = output;
   }
-  highlightRun(); updateRunControls(); refreshRunModal();
+  highlightRun(); renderRuntimeProjection(); updateRunControls(); refreshRunModal();
 }
 function appendRunEvents(events) {
   const monitor = state.runMonitor, list = $("#rp-logs");
@@ -2052,6 +2175,15 @@ function showRunNode(nodeId) {
   $("#modal").dataset.runView = "node"; $("#modal").dataset.runNode = nodeId;
   $("#run-node-close").onclick = closeModal; refreshRunModal();
 }
+function showRuntimeAgent(runtimeId) {
+  const agent = dynamicTeamProjection(state.lastRun, state.runMonitor.events).byRuntimeId.get(runtimeId);
+  if (!agent) return;
+  openModal(`<h2>${esc(agent.name || agent.agentId)} · 临时成员</h2><div id="runtime-agent-detail"></div>
+    <div class="btn-row"><button id="runtime-agent-close" class="primary">关闭</button></div>`);
+  $("#modal").dataset.runView = "runtime-agent";
+  $("#modal").dataset.runtimeAgent = runtimeId;
+  $("#runtime-agent-close").onclick = closeModal; refreshRunModal();
+}
 function showRunSnapshot() {
   if (!state.lastRun?.graph) return;
   openModal('<h2>本次执行图快照</h2><p class="run-caption">只读显示本次实际执行的节点和连线；状态随运行实时更新。</p><div id="run-snapshot"></div><div class="btn-row"><button id="run-snapshot-close" class="primary">关闭</button></div>');
@@ -2070,21 +2202,37 @@ function refreshRunModal() {
       <h3>输出</h3>${mediaGridFromOutput(node.output)}<pre class="json-view">${esc(fmtJson(node.output) ?? "暂无输出")}</pre>`;
     const box = $("#run-node-detail");
     if (box.dataset.value !== html) { box.innerHTML = html; box.dataset.value = html; }
+  } else if (modal.dataset.runView === "runtime-agent") {
+    const agent = dynamicTeamProjection(run, state.runMonitor.events).byRuntimeId.get(modal.dataset.runtimeAgent);
+    if (!agent) return closeModal();
+    const html = `<p>${esc(RUN_STATUS[agent.status] || agent.status)}</p>
+      <dl class="runtime-detail"><dt>角色</dt><dd>${esc(agent.role || "-")}</dd>
+      <dt>任务</dt><dd>${esc(agent.task || "-")}</dd>
+      <dt>最新进度</dt><dd>${esc(agent.progress || "-")}</dd>
+      <dt>当前工具</dt><dd>${esc(agent.toolName || "-")}</dd>
+      <dt>耗时</dt><dd>${agent.durationMs == null ? "-" : `${esc(agent.durationMs)}ms`}</dd>
+      <dt>子会话</dt><dd>${esc(agent.sessionId || "-")}</dd></dl>
+      ${agent.summary ? `<h3>结果摘要</h3><pre class="json-view">${esc(agent.summary)}</pre>` : ""}
+      ${agent.error ? `<div class="run-error">${esc(agent.error)}</div>` : ""}`;
+    const box = $("#runtime-agent-detail");
+    if (box.dataset.value !== html) { box.innerHTML = html; box.dataset.value = html; }
   } else if (modal.dataset.runView === "snapshot" && run.graph) {
-    const nodes = run.graph.nodes || [], runs = Object.fromEntries((run.node_runs || []).map(n => [n.node_id, n]));
+    const display = dynamicDisplayGraph(run, state.runMonitor.events);
+    const nodes = display.nodes, runs = Object.fromEntries((run.node_runs || []).map(n => [n.node_id, n]));
+    for (const child of display.projection.nodes) runs[child.id] = child;
     const positions = Object.fromEntries(nodes.map((node, i) => [node.id, {
       x: Number.isFinite(Number(node.pos?.x)) ? Number(node.pos.x) : 0,
       y: Number.isFinite(Number(node.pos?.y)) ? Number(node.pos.y) : i * 90 }]));
     const minX = Math.min(0, ...Object.values(positions).map(p => p.x)), minY = Math.min(0, ...Object.values(positions).map(p => p.y));
     const width = Math.max(400, ...Object.values(positions).map(p => p.x + 248)) - minX;
     const height = Math.max(120, ...Object.values(positions).map(p => p.y + 94)) - minY;
-    const edges = (run.graph.edges || []).map(e => {
+    const edges = display.edges.map(e => {
       const a = positions[e.from], b = positions[e.to]; if (!a || !b) return "";
-      return `<path d="M ${a.x + 112} ${a.y + 64} L ${b.x + 112} ${b.y}"/><text x="${(a.x + b.x) / 2 + 120}" y="${(a.y + b.y) / 2 + 32}">${esc(e.branch || "")}</text>`;
+      return `<path class="${e.runtime ? "runtime-snapshot-edge" : ""}" d="M ${a.x + 112} ${a.y + 64} L ${b.x + 112} ${b.y}"/><text x="${(a.x + b.x) / 2 + 120}" y="${(a.y + b.y) / 2 + 32}">${esc(e.branch || "")}</text>`;
     }).join("");
     const boxes = nodes.map(n => {
       const p = positions[n.id], status = runs[n.id]?.status || "pending";
-      return `<g class="snapshot-node" data-node="${esc(n.id)}" data-status="${esc(status)}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}：${esc(RUN_STATUS[status] || status)}" transform="translate(${p.x},${p.y})">
+      return `<g class="snapshot-node ${n.type === "runtime_agent" ? "runtime-snapshot-node" : ""}" ${n.type === "runtime_agent" ? `data-runtime="${esc(n.id)}"` : `data-node="${esc(n.id)}"`} data-status="${esc(status)}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}：${esc(RUN_STATUS[status] || status)}" transform="translate(${p.x},${p.y})">
         <rect width="224" height="64" rx="10"/><text x="12" y="25">${esc((n.label || n.id).slice(0, 24))}</text>
         <text class="snapshot-status" x="12" y="48">${esc(RUN_STATUS[status] || status)}</text></g>`;
     }).join("");
@@ -2092,6 +2240,10 @@ function refreshRunModal() {
     $$("#run-snapshot [data-node]").forEach(el => {
       el.onclick = () => showRunNode(el.dataset.node);
       el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showRunNode(el.dataset.node); } };
+    });
+    $$("#run-snapshot [data-runtime]").forEach(el => {
+      el.onclick = () => showRuntimeAgent(el.dataset.runtime);
+      el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showRuntimeAgent(el.dataset.runtime); } };
     });
   }
 }
@@ -2409,10 +2561,11 @@ $("#media-upload-input").onchange = async e => {
  * 消息沿边飞行（粒子），透传内容进右侧消息流。零后端改动，全部复用既有 API。 */
 const DH_ROLE = { start: "接待", end: "司仪", condition: "导演", intent: "导演",
   llm: "模型师", agent: "执行师", ai_agent: "智能体", brain: "我的 Agent",
+  runtime_agent: "临时成员",
   boss: "老板", product: "产品经理", architect: "技术架构", developer: "开发",
   qa: "测试", ops: "运维", sales: "销售" };
 const DH_STATE_CLASS = ["is-waiting", "is-idle", "is-running", "is-success",
-  "is-failed", "is-skipped"];
+  "is-completed", "is-failed", "is-cancelled", "is-skipped"];
 const dh = {
   mon: { generation: 0, timer: null, controller: null, seq: 0, retries: 0 },
   scanTimer: null,      // 运行记录轮询
@@ -2438,118 +2591,60 @@ function dhTypeColor(type) {
     || TYPE_HUES[type] || "#8b98f8";
 }
 
-/* ---- 数字人形象：写实半身像（肤色/发型/发色按序号变化，纯 SVG 无外部资源） ---- */
-const DH_SKIN = ["#f7ddc3", "#eec9a0", "#d9a878", "#b98a5e"];
-const DH_HAIR = ["#2c2620", "#15181d", "#5d4230", "#8a6a45", "#3d434f"];
-function dhShade(hex, f) {
-  const n = parseInt(hex.slice(1), 16);
-  const c = v => Math.max(0, Math.min(255, Math.round(v * f)));
-  return `#${((1 << 24) + (c(n >> 16) << 16) + (c((n >> 8) & 255) << 8) + c(n & 255))
-    .toString(16).slice(1)}`;
-}
-function dhFigureSvg(color, idx) {
-  const skin = DH_SKIN[idx % DH_SKIN.length];
-  const hair = DH_HAIR[(idx * 3 + 1) % DH_HAIR.length];
-  const style = idx % 3;                    // 0 短发 · 1 长发 · 2 束发
-  const flip = idx % 2 === 1 ? ' style="transform:scaleX(-1)"' : "";
-  const skinHi = dhShade(skin, 1.12), skinLo = dhShade(skin, .8);
-  const hairLo = dhShade(hair, .55), clothLo = dhShade(color, .6), clothHi = dhShade(color, 1.25);
-  const gid = s => `dhg-${s}${idx}`;
-  const backHair = style === 1 ? `
-    <path d="M43,44 C40,78 44,98 53,106 L62,106 C53,94 50,70 50,50 Z" fill="${dhShade(hair, .8)}"/>
-    <path d="M97,44 C100,78 96,98 87,106 L78,106 C87,94 90,70 90,50 Z" fill="${dhShade(hair, .8)}"/>` : "";
-  const bun = style === 2 ? `
-    <circle cx="70" cy="13" r="8" fill="${hair}"/>
-    <rect x="65" y="18" width="10" height="3" rx="1.5" fill="${color}" opacity=".85"/>` : "";
-  return `<svg viewBox="0 0 140 190" aria-hidden="true"${flip}>
-    <defs>
-      <radialGradient id="${gid("face")}" cx="0.5" cy="0.4" r="0.78">
-        <stop offset="0" stop-color="${skinHi}"/>
-        <stop offset="0.72" stop-color="${skin}"/>
-        <stop offset="1" stop-color="${skinLo}"/>
-      </radialGradient>
-      <linearGradient id="${gid("cloth")}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="${clothHi}"/><stop offset="1" stop-color="${clothLo}"/>
-      </linearGradient>
-    </defs>
-    <ellipse class="dh-ground" cx="70" cy="178" rx="32" ry="4.5"/>
-    <ellipse class="dh-ring" cx="70" cy="177" rx="38" ry="6"/>
-    ${backHair}
-    <g class="dh-legs">
-      <rect class="dh-leg dh-leg-l" x="56" y="140" width="13" height="34" rx="6" fill="${clothLo}"/>
-      <rect class="dh-leg dh-leg-r" x="74" y="140" width="13" height="34" rx="6" fill="${clothLo}"/>
-      <ellipse cx="62" cy="176" rx="8" ry="3.5" fill="#232732"/>
-      <ellipse cx="81" cy="176" rx="8" ry="3.5" fill="#232732"/>
-    </g>
-    <path d="M62,70 L78,70 L78,90 C74,95 66,95 62,90 Z" fill="url(#${gid("face")})"/>
-    <path d="M62,70 L78,70 L78,78 C73,82 67,82 62,78 Z" fill="rgba(0,0,0,.12)"/>
-    <path d="M40,150 C42,116 52,102 64,96 L76,96 C88,102 98,116 100,150 Z" fill="url(#${gid("cloth")})"/>
-    <path d="M52,116 C54,127 54,139 52,147" stroke="rgba(0,0,0,.1)" stroke-width="2.5"
-      fill="none" stroke-linecap="round"/>
-    <path d="M88,114 C86,126 86,139 88,147" stroke="rgba(0,0,0,.1)" stroke-width="2.5"
-      fill="none" stroke-linecap="round"/>
-    <path d="M56,97 L70,115 L84,97 C79,93.5 61,93.5 56,97 Z" fill="rgba(244,246,250,.92)"/>
-    <rect x="69" y="115" width="2" height="33" rx="1" fill="rgba(0,0,0,.16)"/>
-    <path d="M48,122 C52,108 58,101 64,98" stroke="rgba(255,255,255,.14)" stroke-width="3"
-      fill="none" stroke-linecap="round"/>
-    <path d="M92,122 C88,108 82,101 76,98" stroke="rgba(255,255,255,.14)" stroke-width="3"
-      fill="none" stroke-linecap="round"/>
-    <path class="dh-arm dh-arm-l" d="M48,103 C41,118 38,140 42,152" stroke="${clothLo}"
-      stroke-width="11" fill="none" stroke-linecap="round"/>
-    <path class="dh-arm dh-arm-r" d="M92,103 C98,118 102,140 98,152" stroke="${clothLo}"
-      stroke-width="11" fill="none" stroke-linecap="round"/>
-    <circle cx="42" cy="157" r="5" fill="${skin}"/>
-    <circle cx="98" cy="157" r="5" fill="${skin}"/>
-    <circle cx="45.5" cy="55" r="4.2" fill="${skin}"/>
-    <circle cx="94.5" cy="55" r="4.2" fill="${skin}"/>
-    <ellipse cx="70" cy="52" rx="24" ry="27" fill="url(#${gid("face")})"/>
-    <path d="M84,32 C90,38 93,46 92,55 C91,66 86,74 78,77 C86,74 91,64 91,54 C91,44 88,37 84,32 Z"
-      fill="rgba(0,0,0,.08)"/>
-    <ellipse cx="70" cy="77" rx="10" ry="3" fill="rgba(0,0,0,.05)"/>
-    <path d="M55,47.5 Q60,45.2 65,47.2" stroke="${hairLo}" stroke-width="2" fill="none"
-      stroke-linecap="round"/>
-    <path d="M75,47.2 Q80,45.2 85,47.5" stroke="${hairLo}" stroke-width="2" fill="none"
-      stroke-linecap="round"/>
-    <g class="dh-eyes">
-      <ellipse cx="60" cy="54" rx="4.8" ry="3.2" fill="#fff"/>
-      <ellipse cx="80" cy="54" rx="4.8" ry="3.2" fill="#fff"/>
-      <circle cx="60.8" cy="54.2" r="2.3" fill="#3c332b"/>
-      <circle cx="80.8" cy="54.2" r="2.3" fill="#3c332b"/>
-      <circle cx="60.8" cy="54.2" r="1.1" fill="#1a1512"/>
-      <circle cx="80.8" cy="54.2" r="1.1" fill="#1a1512"/>
-      <circle cx="61.7" cy="53.3" r=".8" fill="#fff"/>
-      <circle cx="81.7" cy="53.3" r=".8" fill="#fff"/>
-      <path d="M55.4,52.4 Q60,50.2 64.6,52.4" stroke="rgba(0,0,0,.28)" stroke-width="1"
-        fill="none" stroke-linecap="round"/>
-      <path d="M75.4,52.4 Q80,50.2 84.6,52.4" stroke="rgba(0,0,0,.28)" stroke-width="1"
-        fill="none" stroke-linecap="round"/>
-    </g>
-    <path d="M70,56 Q68.4,61 70.4,63.4" stroke="${skinLo}" stroke-width="1.4" fill="none"
-      stroke-linecap="round" opacity=".85"/>
-    <circle cx="67.6" cy="63.8" r=".7" fill="rgba(0,0,0,.18)"/>
-    <circle cx="72.4" cy="63.8" r=".7" fill="rgba(0,0,0,.18)"/>
-    <ellipse cx="54.5" cy="62.5" rx="3.4" ry="2" fill="#e58a7a" opacity=".2"/>
-    <ellipse cx="85.5" cy="62.5" rx="3.4" ry="2" fill="#e58a7a" opacity=".2"/>
-    <path d="M63,69.3 Q70,66.6 77,69.3" stroke="#9c5a4e" stroke-width="1.7" fill="none"
-      stroke-linecap="round"/>
-    <path d="M64.5,70.4 Q70,73.6 75.5,70.4" stroke="#b96b5c" stroke-width="1.7" fill="none"
-      stroke-linecap="round" opacity=".85"/>
-    <path d="M47,52 C45,24 57,15 70,15 C83,15 95,24 93,52 C90,34 82,27 70,27 C58,27 50,34 47,52 Z"
-      fill="${hair}"/>
-    <path d="M52,29 C56,23 62,20 68,19.5" stroke="rgba(255,255,255,.22)" stroke-width="2.4"
-      fill="none" stroke-linecap="round"/>
-    ${bun}
-  </svg>`;
+const DH_IDENTITY_COUNT = 6;
+const DH_PORTRAIT_ROOT = "/assets/digital-humans";
+
+function dhIdentityIndex(node) {
+  const value = String(node?.id || node?.label || "digital-human");
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash % DH_IDENTITY_COUNT;
 }
 
-function dhAvatarHtml(node, idx) {
+function dhPortraitUrl(index, pose) {
+  const identity = String((Number(index) % DH_IDENTITY_COUNT) + 1).padStart(2, "0");
+  return `${DH_PORTRAIT_ROOT}/employee-${identity}-${pose}.webp`;
+}
+
+function dhInitials(label) {
+  const parts = String(label || "AI").trim().split(/\s+/).filter(Boolean);
+  const value = parts.length > 1 ? parts.slice(0, 2).map(part => [...part][0]).join("")
+    : [...(parts[0] || "AI")].slice(0, 2).join("");
+  return value.toUpperCase();
+}
+
+function dhPreloadPortraits() {
+  if (dh.portraitPreloads) return;
+  dh.portraitPreloads = [];
+  for (let index = 0; index < DH_IDENTITY_COUNT; index++) {
+    for (const pose of ["seated", "standing"]) {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = dhPortraitUrl(index, pose);
+      dh.portraitPreloads.push(image);
+    }
+  }
+}
+
+function dhAvatarHtml(node) {
   const color = dhTypeColor(node.type);
   const meta = state.nodeTypes[node.type] || {};
+  const identity = dhIdentityIndex(node);
   return `<div class="dh-avatar" data-node="${esc(node.id)}" style="--dh:${esc(color)}">
     <div class="dh-bubble" hidden></div>
     <div class="dh-scene">
       <div class="dh-pad"></div>
-      <div class="dh-person"><div class="dh-fig">${dhFigureSvg(color, idx)}</div></div>
+      <div class="dh-person"><div class="dh-fig">
+        <img class="dh-portrait dh-pose-seated" data-pose="seated"
+          src="${dhPortraitUrl(identity, "seated")}" alt="" aria-hidden="true" decoding="async">
+        <img class="dh-portrait dh-pose-standing" data-pose="standing"
+          src="${dhPortraitUrl(identity, "standing")}" alt="" aria-hidden="true" decoding="async">
+        <span class="dh-avatar-fallback" aria-hidden="true">${esc(dhInitials(node.label || node.id))}</span>
+        <span class="dh-status-ring" aria-hidden="true"></span>
+      </div></div>
       <svg class="dh-desk" viewBox="0 0 110 60" aria-hidden="true">
         <rect class="dh-mon" x="30" y="1" width="50" height="26" rx="4"/>
         <rect class="dh-mon-screen" x="34" y="5" width="42" height="18" rx="2"/>
@@ -2645,7 +2740,7 @@ function dhPoint(nodeId) {
 
 function dhPlaceAvatar(node, idx) {
   const wrap = document.createElement("div");
-  wrap.innerHTML = dhAvatarHtml(node, idx);
+  wrap.innerHTML = dhAvatarHtml(node);
   const el = wrap.firstElementChild;
   el.classList.add("is-waiting");
   el.dataset.label = node.label || node.id;
@@ -2653,8 +2748,19 @@ function dhPlaceAvatar(node, idx) {
   el.style.left = `${pos.x - 55}px`;
   el.style.top = `${pos.y - 24}px`;
   el.addEventListener("click", () => dhFocusNode(node.id));
+  el.querySelectorAll(".dh-portrait").forEach(image => {
+    const poseClass = `has-${image.dataset.pose}`;
+    const markReady = () => {
+      if (image.naturalWidth > 0) el.classList.add(poseClass);
+      else el.classList.remove(poseClass);
+    };
+    image.addEventListener("load", markReady, { once: true });
+    image.addEventListener("error", () => el.classList.remove(poseClass), { once: true });
+    if (image.complete) markReady();
+  });
   $("#dh-world").append(el);
-  dh.els.set(node.id, { wrap: el, bubble: el.querySelector(".dh-bubble"), hideTimer: null });
+  dh.els.set(node.id, { wrap: el, bubble: el.querySelector(".dh-bubble"),
+    person: el.querySelector(".dh-person"), hideTimer: null });
 }
 
 function dhDrawEdge(edge) {
@@ -2683,7 +2789,8 @@ function dhBuildStage(run) {
   $("#dh-edges").replaceChildren();
   dh.els.clear(); dh.graph = null; dh.pos = null;
   $("#dh-stage-note").textContent = "";
-  const nodes = run?.graph?.nodes;
+  const display = dynamicDisplayGraph(run, dh.events);
+  const nodes = display.nodes;
   if (!nodes?.length) {
     const roster = (run?.node_runs || []).map(n => ({ id: n.node_id, type: n.type,
       label: n.label || n.node_id }));
@@ -2699,14 +2806,14 @@ function dhBuildStage(run) {
     $("#dh-empty").classList.add("view-hidden");
     return;
   }
-  dh.graph = run.graph;
+  dh.graph = { nodes, edges: display.edges };
   const stage = $("#dh-stage");
   const W = stage.clientWidth || 900, H = stage.clientHeight || 560;
   $("#dh-edges").setAttribute("viewBox", `0 0 ${W} ${H}`);
-  dh.pos = dhComputePositions(nodes, run.graph.edges || [], dh.layoutMode, W, H);
+  dh.pos = dhComputePositions(nodes, display.edges, dh.layoutMode, W, H);
   dhApplyStageScale();
   nodes.forEach((n, i) => dhPlaceAvatar(n, i));
-  for (const edge of run.graph.edges || []) dhDrawEdge(edge);
+  for (const edge of display.edges) dhDrawEdge(edge);
   $("#dh-empty").classList.add("view-hidden");
 }
 
@@ -2747,7 +2854,8 @@ function dhBubble(nodeId, text, sticky = false) {
 }
 
 function dhResetStates(initial = "is-waiting") {
-  for (const avatar of dh.els.values()) {
+  for (const [nodeId, avatar] of dh.els) {
+    dhRestoreHomePose(nodeId);
     avatar.wrap.classList.remove(...DH_STATE_CLASS);
     avatar.wrap.classList.add(initial);
     avatar.bubble.hidden = true;
@@ -2781,40 +2889,58 @@ function dhWalkSource(targetId) {
   return preds.find(id => status.get(id) === "success" && id !== targetId) || null;
 }
 
+function dhSetStanding(nodeId) {
+  const avatar = dhAvatar(nodeId);
+  if (!avatar?.wrap.classList.contains("has-standing")) return false;
+  avatar.wrap.classList.add("is-standing");
+  return true;
+}
+
+function dhRestoreHomePose(nodeId) {
+  const avatar = dhAvatar(nodeId);
+  if (!avatar) return;
+  avatar.person.style.transitionDuration = "";
+  avatar.person.style.transform = "";
+  avatar.wrap.classList.remove("is-standing", "is-walking");
+}
+
 async function dhWalkOnce(fromId, toId, note = "") {
   if (dhReducedMotion() || document.hidden || fromId === toId) return dhPulse(toId);
-  const grab = () => ({
-    src: dhAvatar(fromId), dst: dhAvatar(toId),
-    person: dhAvatar(fromId)?.wrap.querySelector(".dh-person"),
-  });
-  const cleanup = () => {   // 中途退出也要卸下行走态，避免卡在半路
-    const g = grab();
-    if (g.person) g.person.style.transform = "";
-    dhAvatar(fromId)?.wrap.classList.remove("is-walking");
-    if (note) { const a = dhAvatar(fromId); if (a) a.bubble.hidden = true; }
-  };
-  let { src, dst, person } = grab();
-  if (!src || !dst || !person) return dhPulse(toId);
-  const dx = dst.wrap.offsetLeft - src.wrap.offsetLeft;
-  const dy = dst.wrap.offsetTop - src.wrap.offsetTop;
-  const dur = Math.min(1500, 450 + Math.hypot(dx, dy) * 1.3);
-  src.wrap.classList.add("is-walking");
-  if (note) dhBubble(fromId, note, true);   // 送信人头顶带着要送的话
-  person.style.transitionDuration = `${dur}ms`;
-  person.style.transform = `translate(${dx}px, ${dy}px)`;
-  await dhSleep(dur + 60);
-  ({ src, person } = grab());
-  if (!src || !person || state.viewMode !== "dh") { cleanup(); return; }
-  dhPulse(toId);
-  dhBubble(toId, `收到来自 ${src.wrap.dataset.label || fromId} 的交付`);
-  await dhSleep(520);
-  ({ src, person } = grab());
-  if (!src || !person || state.viewMode !== "dh") { cleanup(); return; }
-  person.style.transitionDuration = `${dur}ms`;
-  person.style.transform = "";
-  await dhSleep(dur + 60);
-  dhAvatar(fromId)?.wrap.classList.remove("is-walking");
-  if (note) { const a = dhAvatar(fromId); if (a) a.bubble.hidden = true; }
+  const original = dhAvatar(fromId);
+  const target = dhAvatar(toId);
+  if (!original || !target || !dhSetStanding(fromId)) return dhPulse(toId);
+  const stillCurrent = () => state.viewMode === "dh"
+    && dhAvatar(fromId)?.wrap === original.wrap
+    && dhAvatar(toId)?.wrap === target.wrap;
+  try {
+    if (note) dhBubble(fromId, note, true);
+    await dhSleep(240);
+    if (!stillCurrent() || document.hidden) return dhPulse(toId);
+
+    const dx = target.wrap.offsetLeft - original.wrap.offsetLeft;
+    const dy = target.wrap.offsetTop - original.wrap.offsetTop;
+    const duration = Math.min(1500, 450 + Math.hypot(dx, dy) * 1.3);
+    original.wrap.classList.add("is-walking");
+    original.person.style.transitionDuration = `${duration}ms`;
+    original.person.style.transform = `translate(${dx}px, ${dy}px)`;
+    await dhSleep(duration + 60);
+    if (!stillCurrent() || document.hidden) return;
+
+    dhPulse(toId);
+    dhBubble(toId, `收到来自 ${original.wrap.dataset.label || fromId} 的交付`);
+    await dhSleep(520);
+    if (!stillCurrent() || document.hidden) return;
+
+    original.person.style.transitionDuration = `${duration}ms`;
+    original.person.style.transform = "";
+    await dhSleep(duration + 60);
+  } finally {
+    dhRestoreHomePose(fromId);
+    if (note) {
+      const avatar = dhAvatar(fromId);
+      if (avatar) avatar.bubble.hidden = true;
+    }
+  }
 }
 
 function dhWalkDeliver(fromId, toId, note = "") {
@@ -2826,7 +2952,9 @@ function dhWalkDeliver(fromId, toId, note = "") {
 /* ---- 消息透传流 ---- */
 const DH_KIND = { "node.started": "开始", "node.log": "日志",
   "node.finished": "完成", "run.queued": "流程",
-  "run.started": "流程", "run.finished": "流程" };
+  "run.started": "流程", "run.finished": "流程",
+  "agent.spawned": "派生", "agent.started": "开始", "agent.progress": "进度",
+  "agent.completed": "完成", "agent.failed": "失败" };
 
 function dhFeedAdd(event) {
   const feed = $("#dh-feed");
@@ -2874,6 +3002,27 @@ function dhApplyEvents(events, { record = true } = {}) {
       dhBubble(event.node_id, event.message);
     } else if (event.type === "run.finished") {
       for (const avatar of dh.els.values()) avatar.bubble.hidden = true;
+    } else if (String(event.type || "").startsWith("agent.")) {
+      const runtimeId = dynamicRuntimeId(event.node_id, event.agentId);
+      if (!dh.els.has(runtimeId)) dhBuildStage(dh.run);
+      if (event.type === "agent.spawned") {
+        dhSetState(runtimeId, "waiting");
+        dhBubble(runtimeId, event.task || event.message, true);
+      } else if (event.type === "agent.started") {
+        dhSetState(runtimeId, "running");
+        dhBubble(runtimeId, "开始执行", true);
+        if (event.node_id) dhWalkDeliver(event.node_id, runtimeId, event.task || "派发任务");
+      } else if (event.type === "agent.progress") {
+        dhSetState(runtimeId, "running");
+        dhBubble(runtimeId, event.message || event.text, true);
+      } else if (event.type === "agent.completed") {
+        dhSetState(runtimeId, "completed");
+        dhBubble(runtimeId, event.summary || event.message || "已完成");
+      } else if (event.type === "agent.failed") {
+        dhSetState(runtimeId, ["PARENT_CANCELLED", "RUN_CANCELLED"].includes(event.code)
+          ? "cancelled" : "failed");
+        dhBubble(runtimeId, event.message || "执行失败");
+      }
     }
   }
 }
@@ -2883,6 +3032,8 @@ function dhSyncStates(run) {
     if (!dh.els.has(nodeRun.node_id)) continue;
     dhSetState(nodeRun.node_id, nodeRun.status === "pending" ? "waiting" : nodeRun.status);
   }
+  for (const child of dynamicTeamProjection(run, dh.events).nodes)
+    dhSetState(child.id, child.status === "queued" ? "waiting" : child.status);
 }
 
 function dhRenderBanner(run) {
@@ -2902,17 +3053,35 @@ function dhStopPoll() {
   dh.mon.controller = null;
 }
 
+function dhRenderHistoricalFeed(events) {
+  const feed = $("#dh-feed");
+  feed.replaceChildren();
+  dh.feed.count = 0;
+  for (const event of events.slice(-400)) dhFeedAdd(event);
+  dh.feed.count = events.length;
+  $("#dh-feed-count").textContent = String(events.length);
+  feed.scrollTop = feed.scrollHeight;
+}
+
 async function dhDrainEvents(generation) {
   // 一次性读完全部既有事件（加载终态运行 / 回放前装料）
-  for (let guard = 0; guard < 20; guard++) {
+  while (true) {
     if (dhStale(generation)) return null;
+    const before = dh.mon.seq;
     const data = await api(`/api/runs/${encodeURIComponent(dh.runId)}/events`
       + `?after=${dh.mon.seq}&limit=500`);
-    dhApplyEvents(data.events || []);
-    dh.mon.seq = Math.max(dh.mon.seq, data.next_seq || 0);
-    if (!data.has_more) { dh.run = data.run; return data.run; }
+    if (dhStale(generation)) return null;
+    const events = data.events || [];
+    dh.events.push(...events);
+    dh.mon.seq = Math.max(before, data.next_seq || 0);
+    if (!data.has_more) {
+      dh.run = data.run;
+      dhRenderHistoricalFeed(dh.events);
+      return data.run;
+    }
+    if (!events.length || dh.mon.seq <= before)
+      throw new Error("运行事件游标未前进");
   }
-  return dh.run;
 }
 
 async function dhPoll(generation) {
@@ -2974,13 +3143,16 @@ async function dhAttach(run, { replay = false } = {}) {
   dhResetStates("is-waiting");
   dhSyncStates(run);
   if (terminalRun(run)) {
-    await dhDrainEvents(dh.mon.generation);
+    let historyError = "";
+    try { await dhDrainEvents(dh.mon.generation); }
+    catch (error) { historyError = error.message || String(error); }
     if (dhStale(dh.mon.generation) || dhTeam.id) return;
     // 列表项无图快照与名册，事件排空后拿完整 run 重建舞台。
     dhBuildStage(dh.run);
     dhResetStates("is-waiting");
     dhSyncStates(dh.run);
-    $("#dh-live").textContent = "已加载历史运行。";
+    $("#dh-live").textContent = historyError
+      ? `历史事件未完整加载：${historyError}` : "已加载历史运行。";
     if (dh.events.length > 1) $("#dh-banner").dataset.replay = "1";
   } else {
     $("#dh-live").textContent = "● 实时";
@@ -3074,8 +3246,60 @@ async function dhRunFlow() {
   } catch (error) { showApiError(error, "启动运行失败"); }
 }
 
+function dhBindMobileScrollProxy() {
+  const nav = $("#global-nav");
+  const view = $("#dh-view");
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
+  let lastY = 0;
+  let dragging = false;
+  const active = () => state.viewMode === "dh"
+    && matchMedia("(max-width: 860px)").matches
+    && !view.classList.contains("view-hidden");
+  const finishPointer = event => {
+    if (event.pointerId !== pointerId) return;
+    if (dragging) event.preventDefault();
+    try { nav.releasePointerCapture(pointerId); } catch { /* already released */ }
+    pointerId = null;
+    dragging = false;
+  };
+  nav.addEventListener("wheel", event => {
+    if (!active() || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    const before = view.scrollTop;
+    view.scrollTop += event.deltaY;
+    if (view.scrollTop !== before) event.preventDefault();
+  }, { passive: false });
+  nav.addEventListener("pointerdown", event => {
+    if (!active() || event.pointerType !== "touch") return;
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startY = lastY = event.clientY;
+    dragging = false;
+    try { nav.setPointerCapture(pointerId); } catch { /* capture is optional */ }
+  });
+  nav.addEventListener("pointermove", event => {
+    if (event.pointerId !== pointerId || !active()) return;
+    const totalX = event.clientX - startX;
+    const totalY = startY - event.clientY;
+    let deltaY = lastY - event.clientY;
+    if (!dragging) {
+      if (Math.abs(totalY) < 8 || Math.abs(totalX) > Math.abs(totalY)) return;
+      dragging = true;
+      deltaY = totalY;
+    }
+    lastY = event.clientY;
+    const before = view.scrollTop;
+    view.scrollTop += deltaY;
+    if (view.scrollTop !== before) event.preventDefault();
+  }, { passive: false });
+  nav.addEventListener("pointerup", finishPointer, { passive: false });
+  nav.addEventListener("pointercancel", finishPointer, { passive: false });
+}
+
 function dhEnter() {
   dh.mon.generation++;
+  dhPreloadPortraits();
   $$("#dh-layouts button").forEach(b =>
     b.classList.toggle("on", b.dataset.layout === dh.layoutMode));
   dhRenderFlowSelect();
@@ -3108,6 +3332,7 @@ $("#dh-flow-select").addEventListener("change", e => {
 $("#dh-banner").addEventListener("click", () => {
   if ($("#dh-banner").dataset.replay) dhReplay();
 });
+dhBindMobileScrollProxy();
 new ResizeObserver(() => {
   if (state.viewMode !== "dh" || !dh.run || dh.playing) return;
   clearTimeout(dh._refit);
@@ -3383,6 +3608,7 @@ function switchView(mode) {
   $("#nav-agents").classList.toggle("on", mode === "agents");
   $("#nav-flows").classList.toggle("on", inFlows);
   $("#nav-dh").classList.toggle("on", mode === "dh");
+  document.body.classList.toggle("dh-view-active", mode === "dh");
   $("#agents-view").classList.toggle("view-hidden", mode !== "agents");
   $("#flows-view").classList.toggle("view-hidden", mode !== "flows-list");
   $("#dh-view").classList.toggle("view-hidden", mode !== "dh");
@@ -3482,7 +3708,8 @@ function agentModeChip(agent) {
     const provider = agent?.orchestration?.provider === "customer-agent"
       || agent?.runtime === "customer-agent" ? "Customer Agent" : "第三方智能体";
     const model = agent?.orchestration?.selection?.model_id || agent?.profile_id || "";
-    return `↗ ${provider}${model ? ` · ${esc(model)}` : ""}`;
+    const dynamic = agent?.orchestration?.dynamic_team?.enabled ? " · 动态团队" : "";
+    return `↗ ${provider}${model ? ` · ${esc(model)}` : ""}${dynamic}`;
   }
   if (mode === "flow") {
     return `◆ 流程 · ${esc(agent?.orchestration?.flow_id || agent?.flow_id || "未选择")}`;
@@ -3967,6 +4194,11 @@ function agentEditModal(agent, options = {}) {
   };
   let caModel = selection.model_id || a.profile_id || "aihub-deepseek";
   let caToolPolicy = selection.tool_policy_id || "";
+  const dynamicTeam = orchestration.dynamic_team || {};
+  let caDynamicEnabled = dynamicTeam.enabled === true;
+  let caDynamicWorkers = Number(dynamicTeam.max_workers) || 6;
+  let caDynamicParallel = Number(dynamicTeam.max_parallel) || 3;
+  let caDynamicTimeout = Number(dynamicTeam.worker_timeout_seconds) || 900;
   const caMemoryInitial = selection.memory_enabled !== undefined
     ? selection.memory_enabled : a.memory;
   const checks = (items, sel, attr) => (items || []).map(it =>
@@ -4070,9 +4302,29 @@ function agentEditModal(agent, options = {}) {
       ${capabilityGroup("mcp", "MCP", catalog.mcpServers || [], caSelected.mcp)}
       <div class="field"><label class="ag-toggle"><input id="ag-ca-memory" type="checkbox"
         ${caMemoryInitial ? "checked" : ""}
-        ${catalog.features?.memory ? "" : "disabled"}> <span>记忆</span></label></div>`;
+        ${catalog.features?.memory ? "" : "disabled"}> <span>记忆</span></label></div>
+      ${catalog.features?.dynamicAgentOrchestration ? `<div class="ag-sec">动态团队</div>
+        <div class="field"><label class="ag-toggle"><input id="ag-ca-dynamic" type="checkbox"
+          ${caDynamicEnabled ? "checked" : ""}> <span>由 CA 自主派生临时 Agent</span></label>
+          <div class="hint">临时成员只存在于本次运行，最多派生 ${esc(catalog.features.maxSpawnDepth || 1)} 层。</div></div>
+        <div class="ag-dynamic-limits" id="ag-ca-dynamic-limits">
+          <label>成员上限<input id="ag-ca-max-workers" type="number" min="1" max="12" value="${esc(caDynamicWorkers)}"></label>
+          <label>并行上限<input id="ag-ca-max-parallel" type="number" min="1" max="6" value="${esc(caDynamicParallel)}"></label>
+          <label>成员超时（秒）<input id="ag-ca-worker-timeout" type="number" min="30" max="3600" value="${esc(caDynamicTimeout)}"></label>
+        </div>` : `<div class="hint ag-dynamic-unavailable">当前 Customer Agent 不支持动态团队。</div>`}`;
     $("#ag-ca-model").onchange = e => { caModel = e.target.value; };
     $("#ag-ca-tool-policy").onchange = e => { caToolPolicy = e.target.value; };
+    const dynamicToggle = $("#ag-ca-dynamic");
+    const syncDynamicLimits = () => {
+      if ($("#ag-ca-dynamic-limits")) $("#ag-ca-dynamic-limits").hidden = !dynamicToggle?.checked;
+    };
+    if (dynamicToggle) {
+      dynamicToggle.onchange = () => { caDynamicEnabled = dynamicToggle.checked; syncDynamicLimits(); };
+      $("#ag-ca-max-workers").onchange = e => { caDynamicWorkers = Number(e.target.value); };
+      $("#ag-ca-max-parallel").onchange = e => { caDynamicParallel = Number(e.target.value); };
+      $("#ag-ca-worker-timeout").onchange = e => { caDynamicTimeout = Number(e.target.value); };
+      syncDynamicLimits();
+    }
     $$('[data-ca-cap]', host).forEach(input => input.onchange = () => {
       const set = caSelected[input.dataset.caCap];
       input.checked ? set.add(input.dataset.caId) : set.delete(input.dataset.caId);
@@ -4157,6 +4409,18 @@ function agentEditModal(agent, options = {}) {
           || (caToolPolicy && !(catalog.toolPolicies || []).some(item => item.id === caToolPolicy)))
         return toast("存在已失效的 CA 能力，请移除或重新选择", "err");
     }
+    if (mode === "external_agent" && caDynamicEnabled) {
+      if (!catalog?.features?.dynamicAgentOrchestration)
+        return toast("当前 Customer Agent 不支持动态团队", "err");
+      caDynamicWorkers = Number($("#ag-ca-max-workers")?.value || caDynamicWorkers);
+      caDynamicParallel = Number($("#ag-ca-max-parallel")?.value || caDynamicParallel);
+      caDynamicTimeout = Number($("#ag-ca-worker-timeout")?.value || caDynamicTimeout);
+      if (!Number.isInteger(caDynamicWorkers) || caDynamicWorkers < 1 || caDynamicWorkers > 12
+          || !Number.isInteger(caDynamicParallel) || caDynamicParallel < 1 || caDynamicParallel > 6
+          || caDynamicParallel > caDynamicWorkers
+          || !Number.isInteger(caDynamicTimeout) || caDynamicTimeout < 30 || caDynamicTimeout > 3600)
+        return toast("动态团队上限无效，请检查成员数、并行数和超时", "err");
+    }
     const localSkills = [...$$("#modal [data-agskill]")].filter(c => c.checked).map(c => c.dataset.agskill);
     const localTools = [...$$("#modal [data-agtool]")].filter(c => c.checked).map(c => c.dataset.agtool);
     const localMcp = [...$$("#modal [data-agmcp]")].filter(c => c.checked).map(c => c.dataset.agmcp);
@@ -4172,6 +4436,9 @@ function agentEditModal(agent, options = {}) {
         mode, provider: "customer-agent", agent_id: orchestration.agent_id || "",
         include_identity_instructions: caIncludeIdentity,
         connection: { base_url: $("#ag-ca-url").value.trim(), credential_ref: credentialRef },
+        ...(caDynamicEnabled ? { dynamic_team: { enabled: true,
+          max_workers: caDynamicWorkers, max_parallel: caDynamicParallel,
+          worker_timeout_seconds: caDynamicTimeout } } : {}),
         selection: { model_id: caModel, skill_ids: [...caSelected.skills],
           tool_ids: [...caSelected.tools], mcp_server_ids: [...caSelected.mcp],
           memory_enabled: caMemory, tool_policy_id: caToolPolicy },

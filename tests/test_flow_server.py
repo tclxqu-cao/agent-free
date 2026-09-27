@@ -4,6 +4,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+import flow_studio.server as flow_server  # noqa: E402
 from flow_studio.server import create_app  # noqa: E402
 from conftest import make_governed_client  # noqa: E402
 
@@ -19,10 +20,31 @@ def test_health_and_static(client):
     assert page.status_code == 200 and "Flow Studio" in page.text
 
 
+def test_digital_human_asset_route_is_allowlisted(client, tmp_path, monkeypatch):
+    asset_dir = tmp_path / "digital-humans"
+    asset_dir.mkdir()
+    sample = asset_dir / "employee-01-seated.webp"
+    sample.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+    monkeypatch.setattr(flow_server, "DIGITAL_HUMAN_ASSET_DIR", asset_dir)
+
+    response = client.get("/assets/digital-humans/employee-01-seated.webp")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/webp"
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert response.content
+
+    assert client.get("/assets/digital-humans/employee-07-seated.webp").status_code == 404
+    assert client.get("/assets/digital-humans/employee-01-side.webp").status_code == 404
+    assert client.get("/assets/digital-humans/%2e%2e%2fapp.js").status_code == 404
+
+
 def test_node_types_and_agents(client):
     types = client.get("/api/node-types").json()
     assert {"start", "end", "llm", "agent", "condition", "template", "http"} <= set(types)
     assert any(field["key"] == "source" for field in types["condition"]["form"])
+    context = next(field for field in types["ai_agent"]["form"]
+                   if field["key"] == "context")
+    assert context["default"] == {}
     agents = client.get("/api/agents").json()
     job = next(a for a in agents if a["agent"] == "job_agent")
     assert any(a["action"] == "match_today" for a in job["actions"])
@@ -97,6 +119,10 @@ def test_digital_human_stage_is_served(client):
 
     assert 'id="nav-dh"' in page
     assert 'id="dh-view"' in page and 'id="dh-stage"' in page
+    assert "dynamicTeamProjection" in script
+    assert 'if (nodeEl.classList.contains("runtime-node")) return;' in script
+    assert '"agent.spawned"' in script and '"agent.completed"' in script
+    assert "runtime-node" in script
     assert 'id="dh-feed"' in page and 'id="dh-runs"' in page
     assert 'id="dh-run"' in page
     assert 'id="dh-layouts"' in page and 'data-layout="tree"' in page
@@ -105,15 +131,42 @@ def test_digital_human_stage_is_served(client):
     assert "function dhAttach(" in script and "async function dhReplay(" in script
     assert "function dhWalkOnce(" in script and "function dhComputePositions(" in script
     assert "function dhSyncStates(" in script
+    assert "function dhRenderHistoricalFeed(" in script
+    assert "运行事件游标未前进" in script
+    assert "for (let guard = 0; guard < 20; guard++)" not in script
+    assert "function dhIdentityIndex(" in script and "function dhPortraitUrl(" in script
+    assert "function dhInitials(" in script and "function dhPreloadPortraits(" in script
+    assert 'const DH_PORTRAIT_ROOT = "/assets/digital-humans"' in script
+    assert 'class="dh-portrait dh-pose-seated"' in script
+    assert 'class="dh-portrait dh-pose-standing"' in script
+    assert 'class="dh-avatar-fallback"' in script
+    assert "dhPreloadPortraits();" in script
+    assert "function dhSetStanding(" in script and "function dhRestoreHomePose(" in script
+    assert "function dhBindMobileScrollProxy(" in script
+    assert 'document.body.classList.toggle("dh-view-active", mode === "dh")' in script
+    assert 'nav.addEventListener("wheel"' in script
+    assert 'nav.addEventListener("pointermove"' in script
+    assert 'classList.add("is-standing")' in script
+    assert "finally {\n    dhRestoreHomePose(fromId);" in script
+    assert "${dhFigureSvg" not in script
     assert "/api/runs/" in script  # 复用既有事件游标接口，无新增后端
     assert "#dh-view" in style and ".dh-avatar.is-running" in style
     assert ".dh-avatar.is-walking" in style and ".dh-desk" in style
-    assert ".dh-pad" in style and "dh-arm" in script and "dhComputePositions" in script
+    assert ".dh-pad" in style and "dhComputePositions" in script
+    assert ".dh-pose-seated" in style and ".dh-pose-standing" in style
+    assert ".dh-avatar-fallback" in style and ".dh-status-ring" in style
+    assert ".dh-arm" not in style and "@keyframes dh-step" not in style
     assert 'id="dh-team-compose"' in page and 'id="dh-team-start"' in page
     assert "function dhTeamCompose(" in script and "function dhTeamWalk(" in script
     assert "/api/workforce/teams" in script
-    assert "@keyframes dh-bob" in style and "@keyframes dh-step" in style
+    assert "@keyframes dh-walk-photo" in style
     assert ".dh-bubble" in style
+    assert "grid-template-rows: auto clamp(420px, 56dvh, 520px) auto" in style
+    assert "body.dh-view-active #global-nav { touch-action: pan-x; }" in style
+    assert "overflow-y: auto; overscroll-behavior-y: contain" in style
+    assert "touch-action: pan-y; -webkit-overflow-scrolling: touch" in style
+    assert "padding-bottom: max(12px, env(safe-area-inset-bottom))" in style
+    assert "#dh-side { height: clamp(640px, 80dvh, 720px); }" in style
 
 
 def test_agent_delete_draft_is_visible_until_published(client):

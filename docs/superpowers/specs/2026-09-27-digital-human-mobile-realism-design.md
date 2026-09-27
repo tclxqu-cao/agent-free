@@ -82,11 +82,11 @@ At a workstation:
 During delivery:
 
 1. The delivery queue selects the sender and target exactly as it does today.
-2. The seated pose cross-fades out while the standing pose fades in at the sender's workstation.
+2. The seated pose switches to the standing pose at the sender's workstation, then holds briefly so standing is committed before movement.
 3. The standing person moves along the existing delivery trajectory to the target workstation. A subtle alternating translate/rotate step effect suggests walking without deforming the photo.
 4. The recipient pulses and displays the delivery bubble.
 5. The sender returns along the same trajectory.
-6. At the home workstation the standing pose fades out and the seated pose fades back in.
+6. At the home workstation the standing pose switches back to the seated pose.
 
 Only the standing pose moves. The workstation, desk, monitor, name plate, and home status ring remain fixed. Per-person delivery queues remain sequential so one identity cannot be in two places simultaneously.
 

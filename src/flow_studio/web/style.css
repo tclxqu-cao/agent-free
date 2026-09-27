@@ -312,7 +312,9 @@ aside { background: var(--panel); z-index: 10; display: flex; flex-direction: co
 /* 运行状态：深底软色徽章 + 脉冲 */
 .node.st-running { border-color: var(--run); animation: run-pulse 1.3s ease-in-out infinite; }
 .node.st-success { border-color: var(--ok-line); }
+.node.st-completed { border-color: var(--ok-line); }
 .node.st-failed { border-color: var(--err-line); box-shadow: 0 0 0 4px var(--err-soft), var(--shadow); }
+.node.st-cancelled { border-color: var(--skip-line); opacity: .72; }
 .node.st-skipped { border-color: var(--skip-line); opacity: .7; }
 .node .run-badge {
   position: absolute; top: -10px; right: -8px; font-size: 10.5px; padding: 1.5px 8px;
@@ -320,13 +322,40 @@ aside { background: var(--panel); z-index: 10; display: flex; flex-direction: co
   border: 1px solid transparent;
 }
 .node.st-success .run-badge { display: block; background: var(--ok-soft); color: var(--ok); border-color: var(--ok-line); }
+.node.st-completed .run-badge { display: block; background: var(--ok-soft); color: var(--ok); border-color: var(--ok-line); }
 .node.st-failed .run-badge { display: block; background: var(--err-soft); color: var(--err); border-color: var(--err-line); }
+.node.st-cancelled .run-badge { display: block; background: var(--skip-soft); color: var(--ink-2); border-color: var(--skip-line); }
 .node.st-skipped .run-badge { display: block; background: var(--skip-soft); color: var(--ink-2); border-color: var(--skip-line); }
 .node.st-running .run-badge { display: block; background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
 @keyframes run-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(253, 176, 34, .3); }
   50% { box-shadow: 0 0 0 6px rgba(253, 176, 34, 0); }
 }
+
+.node.runtime-node {
+  width: 224px; min-height: 66px; cursor: pointer; border-style: dashed;
+  border-radius: 8px; box-shadow: var(--shadow-sm); z-index: 3;
+}
+.node.runtime-node .type-dot { background: #0d9488; }
+.node.runtime-node .ico-chip { background: rgba(13, 148, 136, .13); color: #14b8a6; }
+.node.runtime-node .runtime-tag {
+  flex: none; font-size: 10px; color: #0d9488; border: 1px solid rgba(13, 148, 136, .42);
+  padding: 1px 5px; border-radius: 4px;
+}
+#edges path.runtime-edge, .runtime-snapshot-edge {
+  stroke: #0d9488; stroke-dasharray: 6 5; pointer-events: none;
+}
+.runtime-row { padding-left: 26px; background: color-mix(in srgb, #0d9488 7%, transparent); }
+.runtime-row b::before { content: "↳ "; color: #0d9488; }
+.runtime-detail { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px 12px; }
+.runtime-detail dt { color: var(--ink-2); }
+.runtime-detail dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.runtime-snapshot-node rect { stroke-dasharray: 6 4; }
+
+.ag-dynamic-limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ag-dynamic-limits label { min-width: 0; font-size: 11px; color: var(--ink-2); }
+.ag-dynamic-limits input { width: 100%; margin-top: 4px; }
+.ag-dynamic-unavailable { padding: 6px 0 10px; }
 
 #canvas-hint {
   position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
@@ -947,49 +976,62 @@ video.media-thumb { background: #000; }
   border: 1px dashed color-mix(in srgb, var(--dh) 38%, transparent);
 }
 .dh-person {
-  position: absolute; left: 12px; bottom: 2px; width: 86px; height: 136px; z-index: 1;
-  transition: transform .8s ease-in-out; will-change: transform;
+  position: absolute; left: 6px; bottom: 1px; width: 98px; height: 142px; z-index: 2;
+  transition: transform .8s ease-in-out; transform-origin: 50% 100%; will-change: transform;
 }
-.dh-fig { width: 100%; height: 100%; position: relative; }
-.dh-fig svg, .dh-person svg { width: 100%; height: 100%; overflow: visible; display: block; }
-.dh-desk { position: absolute; left: 0; bottom: 0; width: 110px; height: 60px; z-index: 2; }
+.dh-fig { width: 100%; height: 100%; position: relative; transition: filter .25s, opacity .2s; }
+.dh-portrait {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+  object-position: 50% 100%; opacity: 0;
+  filter: drop-shadow(0 4px 4px rgba(0, 0, 0, .32)); pointer-events: none;
+}
+.dh-avatar.has-seated:not(.is-standing) .dh-pose-seated { opacity: 1; }
+.dh-avatar.is-standing.has-standing .dh-pose-standing { opacity: 1; }
+.dh-avatar-fallback {
+  position: absolute; left: 50%; top: 44%; transform: translate(-50%, -50%);
+  width: 54px; height: 54px; display: grid; place-items: center;
+  border: 1px solid color-mix(in srgb, var(--dh) 62%, transparent);
+  border-radius: 50%; background: color-mix(in srgb, var(--dh) 18%, var(--panel));
+  color: var(--ink); font-size: 17px; font-weight: 650; transition: opacity .18s;
+}
+.dh-avatar.has-seated:not(.is-standing) .dh-avatar-fallback,
+.dh-avatar.is-standing.has-standing .dh-avatar-fallback { opacity: 0; }
+.dh-status-ring {
+  position: absolute; left: 50%; bottom: 0; width: 74px; height: 12px;
+  transform: translateX(-50%); border: 1.5px dashed var(--dh); border-radius: 50%;
+  opacity: .55; transition: border-color .2s, opacity .2s;
+}
+.dh-desk { position: absolute; left: 0; bottom: 0; width: 110px; height: 60px; z-index: 3; }
 .dh-mon { fill: var(--code-bg); stroke: var(--dh); stroke-width: 1.4; }
 .dh-mon-screen { fill: var(--dh); opacity: .25; }
 .dh-mon-stand, .dh-desk-leg { fill: var(--ink-3); }
 .dh-desk-top { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1; }
-.dh-leg { transform-box: fill-box; transform-origin: 50% 6%; }
-.dh-arm { transform-box: fill-box; transform-origin: 50% 6%; }
-.dh-ground { fill: rgba(0, 0, 0, .38); }
-.dh-ring { fill: none; stroke: var(--dh); stroke-width: 1.5; stroke-dasharray: 4 5; opacity: .55; }
-.dh-eyes { transform-box: fill-box; transform-origin: center;
-  animation: dh-blink 4.6s ease-in-out infinite; }
-.dh-avatar .dh-fig svg { transition: filter .25s; }
 
 /* 状态：等待 → 待机呼吸 → 执行中 → 终态 */
 .dh-avatar.is-waiting .dh-fig { opacity: .5; filter: saturate(.4); }
-.dh-avatar.is-idle .dh-fig { animation: dh-breathe 4.2s ease-in-out infinite; }
-.dh-avatar.is-running .dh-fig { animation: dh-bob 1.1s ease-in-out infinite; filter: drop-shadow(0 0 10px var(--dh)); }
-.dh-avatar.is-running .dh-ring { opacity: .9; animation: dh-ring 1.2s ease-in-out infinite; }
-.dh-avatar.is-running .dh-eyes { animation: dh-blink 1.4s ease-in-out infinite; }
+.dh-avatar.is-idle:not(.is-standing) .dh-pose-seated { animation: dh-breathe 4.2s ease-in-out infinite; }
+.dh-avatar.is-running .dh-fig { filter: drop-shadow(0 0 8px var(--dh)); }
+.dh-avatar.is-running .dh-status-ring { opacity: .95; animation: dh-ring 1.2s ease-in-out infinite; }
 .dh-avatar.is-walking { z-index: 40; }
-.dh-avatar.is-walking .dh-fig { animation: dh-bob .42s ease-in-out infinite; }
-.dh-avatar.is-walking .dh-leg-l { animation: dh-step .42s ease-in-out infinite; }
-.dh-avatar.is-walking .dh-leg-r { animation: dh-step .42s ease-in-out infinite reverse; }
-.dh-avatar.is-walking .dh-arm-l { animation: dh-swing .42s ease-in-out infinite; }
-.dh-avatar.is-walking .dh-arm-r { animation: dh-swing .42s ease-in-out infinite reverse; }
-.dh-avatar.is-success .dh-fig { filter: drop-shadow(0 0 8px var(--ok)); }
-.dh-avatar.is-success .dh-ring { stroke: var(--ok); }
+.dh-avatar.is-walking .dh-pose-standing { animation: dh-walk-photo .42s ease-in-out infinite; }
+.dh-avatar.is-standing .dh-desk { opacity: .42; }
+.dh-avatar.is-success .dh-fig, .dh-avatar.is-completed .dh-fig { filter: drop-shadow(0 0 8px var(--ok)); }
+.dh-avatar.is-success .dh-status-ring, .dh-avatar.is-completed .dh-status-ring { border-color: var(--ok); }
 .dh-avatar.is-failed .dh-fig { filter: drop-shadow(0 0 8px var(--err)); }
-.dh-avatar.is-failed .dh-ring { stroke: var(--err); }
-.dh-avatar.is-skipped .dh-fig { opacity: .55; filter: grayscale(.7); }
+.dh-avatar.is-failed .dh-status-ring { border-color: var(--err); }
+.dh-avatar.is-skipped .dh-fig, .dh-avatar.is-cancelled .dh-fig { opacity: .55; filter: grayscale(.7); }
+
+@media (max-width: 680px) {
+  .ag-dynamic-limits { grid-template-columns: 1fr; }
+}
 .dh-avatar.dh-arrive .dh-fig { animation: dh-arrive .65s ease-out; }
 .dh-avatar.dh-pulse .dh-fig { animation: dh-arrive .65s ease-out; }
 @keyframes dh-breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
-@keyframes dh-bob { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.02); } }
-@keyframes dh-ring { 0%, 100% { stroke-dashoffset: 0; } 50% { stroke-dashoffset: -9; } }
-@keyframes dh-step { 0%, 100% { transform: rotate(15deg); } 50% { transform: rotate(-15deg); } }
-@keyframes dh-swing { 0%, 100% { transform: rotate(9deg); } 50% { transform: rotate(-9deg); } }
-@keyframes dh-blink { 0%, 92%, 100% { transform: scaleY(1); } 96% { transform: scaleY(.08); } }
+@keyframes dh-walk-photo {
+  0%, 100% { transform: translateY(0) rotate(-.4deg); }
+  50% { transform: translateY(-3px) rotate(.4deg); }
+}
+@keyframes dh-ring { 50% { opacity: .35; transform: translateX(-50%) scale(1.08); } }
 @keyframes dh-arrive {
   0% { transform: scale(1); } 40% { transform: scale(1.09); } 100% { transform: scale(1); }
 }
@@ -1049,11 +1091,23 @@ video.media-thumb { background: #000; }
   #dh-view { grid-template-columns: 210px minmax(0, 1fr) 250px; }
 }
 @media (max-width: 860px) {
+  body.dh-view-active #global-nav { touch-action: pan-x; }
   #dh-view {
-    grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(300px, 52vh) minmax(140px, 1fr);
-    height: auto; min-height: calc(100dvh - 54px);
+    flex: 1 1 auto; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto clamp(420px, 56dvh, 520px) auto;
+    height: auto; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain;
+    touch-action: pan-y; -webkit-overflow-scrolling: touch;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
   }
-  #dh-runs-wrap { max-height: 180px; }
+  #dh-side { height: clamp(640px, 80dvh, 720px); }
+  #dh-runs-wrap { min-height: 100px; max-height: 180px; }
+  #dh-side, #dh-stage-wrap, #dh-stage, #dh-world, .dh-avatar, .dh-scene,
+  #dh-feed-side { touch-action: pan-y; }
+  #dh-feed-side { height: clamp(260px, 42dvh, 380px); }
+  #dh-feed {
+    min-height: 0; overflow-y: auto; overscroll-behavior-y: auto;
+    touch-action: pan-y; -webkit-overflow-scrolling: touch;
+  }
 }
 
 /* 团队任务 · 多智能体联动 */
