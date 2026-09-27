@@ -442,3 +442,40 @@ def test_artifact_normalizes_model_html_text_alias_without_weakening_safety():
             "title": "不安全内容",
             "blocks": [{"type": "html", "text": "<script>alert(1)</script>"}],
         })
+
+
+def test_artifact_preserves_isolated_html_css_and_script():
+    artifact = validate_artifact({
+        "schemaVersion": 1,
+        "skill": "portfolio-chat",
+        "title": "动态回答",
+        "blocks": [{
+            "type": "html",
+            "sandbox": True,
+            "html": "<main><h2>成都岗位</h2><canvas aria-label='岗位趋势'></canvas></main>",
+            "css": "main { display: grid; gap: 12px; }",
+            "script": "document.querySelector('canvas').dataset.ready = 'true';",
+        }],
+    })
+
+    assert artifact["blocks"] == [{
+        "type": "html",
+        "sandbox": True,
+        "html": "<main><h2>成都岗位</h2><canvas aria-label='岗位趋势'></canvas></main>",
+        "css": "main { display: grid; gap: 12px; }",
+        "script": "document.querySelector('canvas').dataset.ready = 'true';",
+    }]
+
+    with pytest.raises(ValueError, match="沙箱 HTML 无效"):
+        validate_artifact({
+            "schemaVersion": 1,
+            "skill": "portfolio-chat",
+            "title": "嵌套脚本",
+            "blocks": [{
+                "type": "html",
+                "sandbox": True,
+                "html": "<script>alert(1)</script>",
+                "css": "",
+                "script": "",
+            }],
+        })

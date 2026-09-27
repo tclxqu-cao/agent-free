@@ -76,8 +76,21 @@ def validate_artifact(value: object, expected_skill: str | None = None) -> dict:
                 raise ValueError("Portfolio artifact 媒体地址无效")
         elif kind == "html":
             html = str(block.get("html") or block.get("text") or "")
-            if (not html or len(html) > 80_000
-                    or re.search(r"<\s*(?:script|iframe|object|embed|form|style|link|meta)\b|\son\w+\s*=|javascript:", html, re.I)):
+            sandbox = block.get("sandbox") is True
+            if not html or len(html) > 80_000:
+                raise ValueError("Portfolio artifact HTML 无效")
+            if sandbox:
+                css = block.get("css") or ""
+                script = block.get("script") or ""
+                if (not isinstance(css, str) or len(css) > 60_000
+                        or not isinstance(script, str) or len(script) > 60_000
+                        or re.search(
+                            r"<\s*/?\s*(?:html|head|body|script|style|iframe|object|embed|form|base|link|meta)\b",
+                            html, re.I)):
+                    raise ValueError("Portfolio artifact 沙箱 HTML 无效")
+            elif re.search(
+                    r"<\s*(?:script|iframe|object|embed|form|style|link|meta)\b|\son\w+\s*=|javascript:",
+                    html, re.I):
                 raise ValueError("Portfolio artifact HTML 无效")
         else:
             raise ValueError("Portfolio artifact block 类型无效")
@@ -88,6 +101,14 @@ def validate_artifact(value: object, expected_skill: str | None = None) -> dict:
         elif kind == "html":
             clean_block["html"] = html
             clean_block.pop("text", None)
+            if sandbox:
+                clean_block["sandbox"] = True
+                clean_block["css"] = css
+                clean_block["script"] = script
+            else:
+                clean_block.pop("sandbox", None)
+                clean_block.pop("css", None)
+                clean_block.pop("script", None)
         clean_blocks.append(clean_block)
     return {**value, "schemaVersion": 1, "skill": actual_skill,
             "title": title, "blocks": clean_blocks}
