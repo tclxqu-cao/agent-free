@@ -8,6 +8,8 @@ body 参数识别成 query 参数。项目要求 Python ≥3.11，原生支持 `
 
 import argparse
 import logging
+import os
+import secrets
 import uuid
 import webbrowser
 from pathlib import Path
@@ -174,12 +176,22 @@ def create_app(config_dir: Path = Path("config"),
                data_dir: Path | None = None):
     """应用工厂（测试直接用 tmp 目录）。"""
     from fastapi import FastAPI, HTTPException, Request, Query
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
     from pydantic import BaseModel
 
     studio = Studio(Path(config_dir), data_dir)
     app = FastAPI(title="Flow Studio", docs_url=None, redoc_url=None)
     app.state.studio = studio
+
+        request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+        return JSONResponse({"detail": str(error), "code": error.code,
+                             "request_id": request_id}, status_code=409,
+                            headers={"X-Request-ID": request_id})
+
+        request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
+        return JSONResponse({"detail": str(error), "code": error.code,
+                             "request_id": request_id}, status_code=409,
+                            headers={"X-Request-ID": request_id})
 
     @app.exception_handler(RunQueueFull)
     async def queue_full(request: Request, error: RunQueueFull):
@@ -370,6 +382,41 @@ def create_app(config_dir: Path = Path("config"),
             request_id=principal.request_id)
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
+    ENTRY_VIEWS = {"agents", "flows", "dh"}
+
+    @app.get("/auth/entry")
+    def auth_entry(request: Request, token: str = "", view: str = ""):
+        """带共享 token 的免登录入口：验证 token 后以首个 owner 建会话并重定向。
+
+        供外部入口（如 AgentRoam 的 Flow 按钮）跳转使用；链接即凭证，
+        FLOW_STUDIO_ENTRY_TOKEN 未设置时入口整体关闭。
+        """
+        expected = (os.environ.get("FLOW_STUDIO_ENTRY_TOKEN") or "").strip()
+        if not expected:
+            raise HTTPException(404, "入口未启用")
+        if not secrets.compare_digest(token.strip(), expected):
+            raise HTTPException(403, "入口 token 无效")
+        if not studio.governance.is_initialized():
+            return RedirectResponse("/", status_code=303)
+        owner = studio.governance.first_owner()
+        if owner is None:
+            return RedirectResponse("/", status_code=303)
+        session = studio.governance.create_session(owner["user_id"])
+        workspaces = studio.governance.list_workspaces(owner["user_id"])
+        ip = request.client.host if request.client else ""
+        studio.governance.audit(
+            "auth.entry", workspace_id=workspaces[0]["workspace_id"] if workspaces else None,
+            user_id=owner["user_id"], username=owner["username"],
+            request_id=uuid.uuid4().hex, ip_address=ip)
+        target = "/"
+        if view in ENTRY_VIEWS:
+            target = f"/?view={view}"
+        response = RedirectResponse(target, status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE, session["token"], httponly=True, samesite="strict",
+            secure=request.url.scheme == "https", max_age=12 * 60 * 60, path="/")
         return response
 
     @app.get("/api/me")

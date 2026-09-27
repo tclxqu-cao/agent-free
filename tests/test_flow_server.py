@@ -247,3 +247,35 @@ def test_llm_test_endpoint_disabled(client):
     body = {"system": "s", "prompt": "p"}
     r = client.post("/api/llm/test", json=body).json()
     assert r["ok"] is False and "LLM" in r["error"]
+
+
+def test_auth_entry_disabled_without_token(client, monkeypatch):
+    monkeypatch.delenv("FLOW_STUDIO_ENTRY_TOKEN", raising=False)
+    assert client.get("/auth/entry").status_code == 404
+
+
+def test_auth_entry_rejects_bad_token(client, monkeypatch):
+    monkeypatch.setenv("FLOW_STUDIO_ENTRY_TOKEN", "secret-token")
+    assert client.get("/auth/entry", params={"token": "wrong"}).status_code == 403
+
+
+def test_auth_entry_logs_in_owner_and_targets_view(client, monkeypatch):
+    monkeypatch.setenv("FLOW_STUDIO_ENTRY_TOKEN", "secret-token")
+    r = client.get("/auth/entry", params={"token": "secret-token", "view": "dh"},
+                   follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/?view=dh"
+    cookie = r.cookies.get("flow_studio_session")
+    assert cookie, "入口必须种下会话 cookie"
+    me = client.get("/api/me", cookies={"flow_studio_session": cookie}).json()
+    assert me["user"]["username"] == "owner"
+    # 非法 view 直接回落主页，不带参数
+    r2 = client.get("/auth/entry", params={"token": "secret-token", "view": "evil"},
+                    follow_redirects=False)
+    assert r2.status_code == 303 and r2.headers["location"] == "/"
+
+
+def test_entry_view_bridge_is_served(client):
+    script = client.get("/app.js").text
+    assert "applyEntryView" in script
+    assert 'resolvers[wanted]?.()' in script

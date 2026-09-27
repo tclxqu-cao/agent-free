@@ -262,6 +262,14 @@ class GovernanceStore:
             "WHERE user_id=?", (user_id,)).fetchone()
         return dict(row) if row else None
 
+    def first_owner(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT u.user_id,u.username,u.display_name,u.active,u.created_at "
+            "FROM users u JOIN members m ON m.user_id=u.user_id "
+            "WHERE m.role='owner' AND u.active=1 ORDER BY u.created_at LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
     def _record_login_failure(self, username: str, ip_address: str) -> None:
         now = dt.datetime.now(dt.timezone.utc)
         row = self.conn.execute(

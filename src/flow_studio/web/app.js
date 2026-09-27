@@ -3645,16 +3645,29 @@ function addNode(type) {
 }
 
 /* ================= 启动 ================= */
+/* ?view= 入口页签：外部入口（/auth/entry 重定向）带 view=agents|flows|dh 落到指定页签。
+ * 按导航按钮存在性解析，未知值静默忽略，保持默认主页。 */
+function applyEntryView() {
+  const wanted = new URLSearchParams(window.location.search).get("view");
+  const resolvers = {
+    agents: () => (document.querySelector("#nav-agents") ? "agents" : null),
+    flows: () => (document.querySelector("#nav-flows") ? "flows" : null),
+    dh: () => (document.querySelector("#nav-dh") ? "dh" : null),
+  };
+  const mode = resolvers[wanted]?.();
+  if (mode && state.viewMode !== mode) switchView(mode);
+}
+
 (async function init() {
   try {
     const setup = await api("/api/setup/status");
     if (!setup.initialized) return renderSetup();
-    try { await enterApplication(); }
+    try { await enterApplication(); applyEntryView(); }
     catch (error) {
       if (error.status === 403 && state.workspaceId) {
         state.workspaceId = "";
         localStorage.removeItem("flow-studio-workspace");
-        try { await enterApplication(); return; } catch { /* 转登录 */ }
+        try { await enterApplication(); applyEntryView(); return; } catch { /* 转登录 */ }
       }
       renderLogin();
     }
