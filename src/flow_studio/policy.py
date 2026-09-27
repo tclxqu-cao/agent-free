@@ -39,6 +39,11 @@ class PolicyResult:
 class PolicyEngine:
     """Evaluate Agent/Flow snapshots at submit, publish, preview, or run."""
 
+    WORKFORCE_LIMITS = {
+        "max_teams": (1, 50), "max_members": (1, 20), "max_rounds": (1, 30),
+        "max_messages_per_round": (1, 200), "max_cards": (1, 100),
+    }
+
     def normalize(self, policy: dict | None) -> dict:
         merged = {**DEFAULT_POLICY, **(policy or {})}
         merged["max_agent_steps"] = max(1, min(30, int(merged["max_agent_steps"])))
@@ -51,7 +56,22 @@ class PolicyEngine:
         merged["require_approval"] = bool(merged["require_approval"])
         merged["required_eval_suite_id"] = str(
             merged.get("required_eval_suite_id") or "").strip()
+        merged["workforce"] = self._normalize_workforce(merged.get("workforce"))
         return merged
+
+    def _normalize_workforce(self, raw: dict | None) -> dict:
+        base = dict(DEFAULT_POLICY["workforce"])
+        data = raw if isinstance(raw, dict) else {}
+        base.update({k: v for k, v in data.items() if k in base})
+        for key, (low, high) in self.WORKFORCE_LIMITS.items():
+            base[key] = max(low, min(high, int(base.get(key) or low)))
+        base["allowed_roles"] = sorted({
+            str(v).strip() for v in (base.get("allowed_roles") or [])
+            if str(v).strip()})
+        base["enabled"] = bool(base.get("enabled", True))
+        base["auto_create_agents"] = bool(base.get("auto_create_agents", True))
+        base["allow_human_messages"] = bool(base.get("allow_human_messages", True))
+        return base
 
     def evaluate(self, stage: str, resource_type: str, snapshot: dict | None,
                  context: dict | None = None) -> PolicyResult:
@@ -64,6 +84,8 @@ class PolicyEngine:
             self._agent(snapshot, policy, violations, context)
         elif resource_type == "flow":
             self._flow(snapshot, policy, violations, context)
+        elif resource_type == "workforce":
+            self._workforce(snapshot, policy, violations)
         else:
             violations.append(PolicyViolation(
                 "invalid_resource_type", "策略不支持该资源类型", "resource_type"))
@@ -131,6 +153,37 @@ class PolicyEngine:
                     out.append(PolicyViolation(
                         "cross_workspace_reference",
                         f"引用的资源 {value} 不属于当前 Workspace", key))
+
+    @staticmethod
+    def _workforce(snapshot: dict, policy: dict,
+                   out: list[PolicyViolation]) -> None:
+        workforce = policy["workforce"]
+        if not workforce["enabled"]:
+            out.append(PolicyViolation(
+                "workforce_disabled", "当前 Workspace 已关闭数字员工编制", "workforce"))
+            return
+        limits = {"members": "max_members", "cards": "max_cards",
+                  "team_count": "max_teams"}
+        for key, policy_key in limits.items():
+            used = int(snapshot.get(key) or 0)
+            if key == "team_count":
+                used += 1
+            if used > workforce[policy_key]:
+                out.append(PolicyViolation(
+                    f"{policy_key}_exceeded",
+                    f"{key}={used} 超过策略上限 {workforce[policy_key]}", "workforce"))
+        rounds = int(snapshot.get("max_rounds") or 0)
+        if rounds > workforce["max_rounds"]:
+            out.append(PolicyViolation(
+                "max_rounds_exceeded",
+                f"轮次上限 {rounds} 超过策略允许 {workforce['max_rounds']}",
+                "workforce.max_rounds"))
+        allowed = set(workforce["allowed_roles"])
+        if allowed:
+            for role in snapshot.get("roles") or []:
+                if str(role) not in allowed:
+                    out.append(PolicyViolation(
+                        "role_denied", f"岗位 {role} 不在允许清单中", "workforce.roles"))
 
     @staticmethod
     def _flow(snapshot: dict, policy: dict, out: list[PolicyViolation],

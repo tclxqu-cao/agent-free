@@ -90,6 +90,32 @@ def test_mobile_navigation_and_compact_flow_cards_are_served(client):
     assert 'class="flow-desc"' not in flow_home
 
 
+def test_digital_human_stage_is_served(client):
+    page = client.get("/").text
+    script = client.get("/app.js").text
+    style = client.get("/style.css").text
+
+    assert 'id="nav-dh"' in page
+    assert 'id="dh-view"' in page and 'id="dh-stage"' in page
+    assert 'id="dh-feed"' in page and 'id="dh-runs"' in page
+    assert 'id="dh-run"' in page
+    assert 'id="dh-layouts"' in page and 'data-layout="tree"' in page
+    assert 'data-layout="circle"' in page
+    assert '$("#nav-dh").onclick' in script
+    assert "function dhAttach(" in script and "async function dhReplay(" in script
+    assert "function dhWalkOnce(" in script and "function dhComputePositions(" in script
+    assert "function dhSyncStates(" in script
+    assert "/api/runs/" in script  # 复用既有事件游标接口，无新增后端
+    assert "#dh-view" in style and ".dh-avatar.is-running" in style
+    assert ".dh-avatar.is-walking" in style and ".dh-desk" in style
+    assert ".dh-pad" in style and "dh-arm" in script and "dhComputePositions" in script
+    assert 'id="dh-team-compose"' in page and 'id="dh-team-start"' in page
+    assert "function dhTeamCompose(" in script and "function dhTeamWalk(" in script
+    assert "/api/workforce/teams" in script
+    assert "@keyframes dh-bob" in style and "@keyframes dh-step" in style
+    assert ".dh-bubble" in style
+
+
 def test_agent_delete_draft_is_visible_until_published(client):
     created = client.post("/api/ai-agents", json={
         "id": "delete-visible", "name": "Delete Visible",

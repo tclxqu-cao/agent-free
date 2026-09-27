@@ -16,6 +16,9 @@ from pathlib import Path
 
 from .adapters import register_job_agent
 from .agentrt import normalize_agent
+from .board import BoardError
+from .bus import BROADCAST, HUMAN_ACTOR
+from .crew import CrewError
 from .evals import EvalStore, TargetRunner, compare_runs, run_suite
 from .external_agent import CustomerAgentProvider, ExternalAgentError
 from .graph import NODE_TYPES, FlowGraph, graph_from_dict, graph_to_dict, start_inputs
@@ -29,6 +32,7 @@ from .policy import PolicyEngine
 from .registry import AgentRegistry
 from .template import build_namespace, render
 from .versioning import VersionService
+from .workforce import ROLE_TEMPLATES, build_agent_spec, compose, normalize_plan
 from .workspace import WorkspaceManager, RunQueueFull
 from .homepage import HomepageService
 
@@ -112,6 +116,16 @@ def _required_capability(method: str, path: str) -> str | None:
         return "release.approve"
     if path.startswith("/api/evals/suites/") and path.endswith("/run"):
         return "eval.execute"
+    if path.startswith("/api/workforce/"):
+        if path.endswith("/message"):
+            return "resource.write"
+        if any(path.endswith(suffix) for suffix in
+               ("/start", "/resume", "/pause", "/stop", "/cards")):
+            return "runtime.execute" if path.endswith(
+                ("/start", "/resume", "/pause", "/stop")) else "resource.write"
+        if path.endswith("/step"):
+            return "runtime.preview"
+        return "resource.read" if method == "GET" else "resource.write"
     if ((path.startswith("/api/flows/") and path.endswith("/run"))
             or (path.startswith("/api/ai-agents/") and path.endswith("/invoke"))
             or path == "/api/agent/chat"
@@ -126,6 +140,15 @@ def _required_capability(method: str, path: str) -> str | None:
     if path.startswith("/api/"):
         return "resource.write"
     return "resource.read"
+
+
+def _pos_int(value, default: int) -> int:
+    """请求体里的正整数参数：非法值退回默认，不让脏输入变成 500。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
 
 
 def _version_payload(version: dict) -> dict:
@@ -183,11 +206,15 @@ def create_app(config_dir: Path = Path("config"),
     app = FastAPI(title="Flow Studio", docs_url=None, redoc_url=None)
     app.state.studio = studio
 
+    @app.exception_handler(BoardError)
+    async def board_error(request: Request, error: BoardError):
         request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
         return JSONResponse({"detail": str(error), "code": error.code,
                              "request_id": request_id}, status_code=409,
                             headers={"X-Request-ID": request_id})
 
+    @app.exception_handler(CrewError)
+    async def crew_error(request: Request, error: CrewError):
         request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
         return JSONResponse({"detail": str(error), "code": error.code,
                              "request_id": request_id}, status_code=409,
@@ -504,7 +531,9 @@ def create_app(config_dir: Path = Path("config"),
 
     @app.get("/api/governance/policy")
     def get_policy(request: Request):
-        return studio.governance.get_policy(_principal(request).workspace_id)
+        # 返回归一化策略：旧数据缺字段时前端也能看到完整可编辑的默认值
+        return studio.policy.normalize(
+            studio.governance.get_policy(_principal(request).workspace_id))
 
     @app.put("/api/governance/policy")
     def save_policy(request: Request, body: dict):
@@ -1166,6 +1195,323 @@ def create_app(config_dir: Path = Path("config"),
     @app.put("/api/video/models")
     def put_video_models(body: dict, request: Request):
         return _runtime(request).vmodels.save(body)
+
+
+    # ---------------------------------------------------------- 数字员工编制
+    def workforce_gate(principal: Principal, runtime, snapshot: dict,
+                      policy: dict) -> None:
+        result = studio.policy.evaluate("start", "workforce", snapshot,
+                                        {"policy": policy})
+        if not result.allowed:
+            raise GovernanceError(result.primary_code, "策略门禁拒绝了该操作",
+                                  403, result.to_dict())
+
+    @app.get("/api/workforce/roles")
+    def workforce_roles():
+        return [{"key": role["key"], "name": role["name"], "icon": role["icon"],
+                 "color": role["color"], "charter": role["charter"],
+                 "deliverables": role["deliverables"],
+                 "downstream": role["downstream"]}
+                for role in ROLE_TEMPLATES.values()]
+
+    @app.get("/api/workforce/teams")
+    def workforce_teams(request: Request):
+        runtime = _runtime(request)
+        teams = runtime.teams.list_teams(_principal(request).workspace_id)
+        return [dict(team, employee_count=len(runtime.teams.employees(team["id"])),
+                     running=runtime.crew.running(team["id"])) for team in teams]
+
+    @app.post("/api/workforce/teams")
+    def workforce_create_team(body: dict, request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        task = str(body.get("task") or "").strip()
+        if not task:
+            raise HTTPException(422, "任务描述不能为空")
+        policy = studio.governance.get_policy(principal.workspace_id)
+        workforce_policy = studio.policy.normalize(policy)["workforce"]
+        allowed = workforce_policy["allowed_roles"] or None
+        try:
+            plan = compose(task, studio.llm_cfg, allowed_roles=allowed)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        max_rounds = _pos_int(body.get("max_rounds"),
+                              workforce_policy["max_rounds"])
+        workforce_gate(principal, runtime, {
+            "members": len(plan["roster"]), "cards": len(plan["milestones"]),
+            "roles": [entry["role"] for entry in plan["roster"]],
+            "max_rounds": max_rounds,
+            "team_count": runtime.teams.count_teams(principal.workspace_id)},
+            policy)
+        team = runtime.teams.create_team(
+            workspace_id=principal.workspace_id, task=task, plan=plan,
+            created_by=principal.username, max_rounds=max_rounds)
+        studio.governance.audit(
+            "workforce.team.create", workspace_id=principal.workspace_id,
+            user_id=principal.user_id, username=principal.username,
+            resource_type="workforce", resource_id=team["id"],
+            request_id=request.state.request_id,
+            details={"via": plan.get("via"), "roles": [e["role"] for e in plan["roster"]],
+                     "cards": len(plan["milestones"])})
+        if workforce_policy["auto_create_agents"]:
+            for entry in plan["roster"]:
+                spec = build_agent_spec(entry["role"], task, entry.get("focus") or "")
+                studio.versions.save_draft(principal, "agent", spec["id"], spec)
+                studio.versions.submit(principal, "agent", spec["id"], 1,
+                                       reason="数字员工编制自动创建")
+        if body.get("start"):
+            runtime.crew.start(team["id"], actor=principal.username,
+                               max_rounds=max_rounds)
+        return workforce_snapshot_payload(request, team["id"])
+
+    @app.get("/api/workforce/teams/{team_id}/snapshot")
+    def workforce_snapshot(team_id: str, request: Request):
+        return workforce_snapshot_payload(request, team_id)
+
+    @app.patch("/api/workforce/teams/{team_id}")
+    def workforce_update_team(team_id: str, body: dict, request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        team = _require_team(runtime, team_id)
+        if team["status"] not in ("draft", "paused"):
+            raise GovernanceError("team_locked",
+                                  f"团队当前 {team['status']}，不能修改编制", 409)
+        task = team["task"]
+        if "task" in body:
+            task = str(body.get("task") or "").strip()
+            if not task:
+                raise HTTPException(422, "任务描述不能为空")
+            runtime.teams.set_task(team_id, task)
+        if isinstance(body.get("plan"), dict):
+            try:
+                plan = normalize_plan(task, body["plan"])
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            workforce_gate(principal, runtime, {
+                "members": len(plan["roster"]), "cards": len(plan["milestones"]),
+                "roles": [entry["role"] for entry in plan["roster"]],
+                "max_rounds": team["max_rounds"], "team_count": 0},
+                studio.governance.get_policy(principal.workspace_id))
+            runtime.teams.set_team_plan(team_id, plan)
+        studio.governance.audit(
+            "workforce.team.update", workspace_id=principal.workspace_id,
+            user_id=principal.user_id, username=principal.username,
+            resource_type="workforce", resource_id=team_id,
+            request_id=request.state.request_id, details={"fields": sorted(body)})
+        return workforce_snapshot_payload(request, team_id)
+
+    @app.post("/api/workforce/teams/{team_id}/start")
+    def workforce_start(team_id: str, request: Request, body: dict | None = None):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        team = _require_team(runtime, team_id)
+        max_rounds = (body or {}).get("max_rounds")
+        policy = studio.governance.get_policy(principal.workspace_id)
+        employees = runtime.teams.employees(team_id)
+        # draft 团队还没 provision，编制只存在于计划里；按空编制过门禁等于放行
+        roster = employees or team["plan"]["roster"]
+        workforce_gate(principal, runtime, {
+            "members": len(roster),
+            "cards": max(len(runtime.board.list(team_id)),
+                         len(team["plan"]["milestones"])),
+            "roles": [entry["role"] for entry in roster],
+            "max_rounds": int(max_rounds or team["max_rounds"]),
+            "team_count": 0}, policy)
+        return runtime.crew.start(team_id, actor=principal.username,
+                                  max_rounds=max_rounds)
+
+    @app.post("/api/workforce/teams/{team_id}/step")
+    def workforce_step(team_id: str, request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        _require_team(runtime, team_id)
+        return runtime.crew.step(team_id, actor=principal.username)
+
+    @app.post("/api/workforce/teams/{team_id}/pause")
+    def workforce_pause(team_id: str, request: Request):
+        return _crew_action(request, team_id, "pause")
+
+    @app.post("/api/workforce/teams/{team_id}/resume")
+    def workforce_resume(team_id: str, request: Request):
+        return _crew_action(request, team_id, "start")
+
+    @app.post("/api/workforce/teams/{team_id}/stop")
+    def workforce_stop(team_id: str, request: Request):
+        return _crew_action(request, team_id, "stop")
+
+    @app.post("/api/workforce/teams/{team_id}/message")
+    def workforce_message(team_id: str, body: dict, request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        team = _require_team(runtime, team_id)
+        policy = studio.policy.normalize(
+            studio.governance.get_policy(principal.workspace_id))["workforce"]
+        if not policy["allow_human_messages"]:
+            raise GovernanceError("human_message_denied", "策略已禁止人工介入", 403)
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(422, "消息内容不能为空")
+        employees = runtime.teams.employees(team_id)
+        token = str(body.get("to") or "*").strip()
+        recipient = next((e["id"] for e in employees
+                          if token in (e["id"], e["role"], e["name"])), BROADCAST
+                         if token in ("", "*", "all") else None)
+        if recipient is None:
+            raise HTTPException(422, f"收件人不存在：{token}")
+        message = runtime.bus.post(
+            workspace_id=principal.workspace_id, team_id=team_id,
+            from_actor=HUMAN_ACTOR, to_actor=recipient, kind="human",
+            subject=str(body.get("subject") or "老板指示")[:200],
+            body={"text": text[:4000], "from_role": "human"},
+            parent_seq=(int(body["parent_seq"])
+                        if str(body.get("parent_seq") or "").isdigit() else None),
+            round_no=int(team["round_no"]))
+        studio.governance.audit(
+            "workforce.message.human", workspace_id=principal.workspace_id,
+            user_id=principal.user_id, username=principal.username,
+            resource_type="workforce", resource_id=team_id,
+            request_id=request.state.request_id,
+            details={"to": recipient, "seq": message["seq"]})
+        resumed = False
+        if team["status"] in ("waiting_human", "paused") and body.get("resume", True):
+            runtime.crew.start(team_id, actor=principal.username)
+            resumed = True
+        return {"ok": True, "seq": message["seq"], "resumed": resumed}
+
+    @app.post("/api/workforce/teams/{team_id}/cards")
+    def workforce_add_card(team_id: str, body: dict, request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        team = _require_team(runtime, team_id)
+        role = str(body.get("role") or "").strip()
+        if role and role not in ROLE_TEMPLATES:
+            raise HTTPException(422, f"未知岗位：{role}")
+        card = runtime.board.add(
+            workspace_id=principal.workspace_id, team_id=team_id,
+            title=str(body.get("title") or ""), role=role,
+            detail=str(body.get("detail") or ""),
+            depends_on=[str(d) for d in (body.get("depends_on") or [])],
+            created_by=principal.username)
+        runtime.bus.post(workspace_id=principal.workspace_id, team_id=team_id,
+                         from_actor=HUMAN_ACTOR,
+                         to_actor=next((e["id"] for e in runtime.teams.employees(team_id)
+                                        if e["role"] == role), BROADCAST),
+                         kind="assign", subject=f"老板加卡：{card['title'][:60]}",
+                         body={"text": card["detail"] or "见看板"},
+                         round_no=int(team["round_no"]))
+        return {"ok": True, "card": card}
+
+    @app.put("/api/workforce/teams/{team_id}/cards/{card_id}")
+    def workforce_update_card(team_id: str, card_id: str, body: dict,
+                              request: Request):
+        principal = _principal(request)
+        runtime = _runtime(request)
+        _require_team(runtime, team_id)
+        card = runtime.board.get(card_id)
+        if card is None or card["team_id"] != team_id:
+            raise HTTPException(404, "卡片不存在")
+        if str(body.get("status") or "").strip():
+            runtime.board.move(card_id, str(body["status"]).strip(),
+                               principal.username, str(body.get("reason") or "人工迁移"))
+        fields = {key: body[key] for key in
+                  ("title", "detail", "role", "priority", "depends_on")
+                  if key in body}
+        if fields:
+            card = runtime.board.update(card_id, principal.username, **fields)
+        return {"ok": True, "card": runtime.board.get(card_id)}
+
+    @app.get("/api/workforce/teams/{team_id}/inbox/{employee_id}")
+    def workforce_inbox(team_id: str, employee_id: str, request: Request):
+        runtime = _runtime(request)
+        _require_team(runtime, team_id)
+        # 广播对任意 actor 都命中：不校验工号，查无此人也能读到全团队广播并写已读
+        if not any(e["id"] == employee_id
+                   for e in runtime.teams.employees(team_id)):
+            raise HTTPException(404, "员工不在本团队编制内")
+        messages = runtime.bus.list(team_id, actor=employee_id, limit=100)
+        return {"messages": messages,
+                "unread": runtime.bus.mark_read_inbox(team_id, employee_id)}
+
+    def workforce_snapshot_payload(request: Request, team_id: str) -> dict:
+        runtime = _runtime(request)
+        team = _require_team(runtime, team_id)
+        employees = runtime.teams.employees(team["id"])
+        rounds = runtime.teams.rounds(team["id"], limit=20)
+        return {
+            "team": team,
+            "employees": [dict(emp, unread=runtime.bus.unread(team["id"], emp["id"]),
+                               role_meta=ROLE_TEMPLATES.get(emp["role"], {}))
+                          for emp in employees],
+            "cards": runtime.board.list(team["id"]),
+            "moves": runtime.board.history(team["id"], limit=80),
+            "messages": runtime.bus.list(team["id"], limit=120),
+            "edges": runtime.bus.pairs(team["id"]),
+            "progress": runtime.board.progress(team["id"]),
+            "rounds": rounds,
+            "running": runtime.crew.running(team["id"]),
+            "stats": runtime.bus.stats(team["id"]),
+        }
+
+    @app.get("/api/workforce/events")
+    def workforce_events(request: Request, after: int = 0):
+        import queue
+
+        from fastapi.responses import StreamingResponse
+
+        principal = _principal(request)
+        runtime = _runtime(request)
+        # Workspace 只能来自会话解析结果：接受客户端入参等于允许订阅他人工作区
+        scope = principal.workspace_id
+
+        def stream():
+            sub = runtime.hub.subscribe()
+            try:
+                for message in runtime.bus.recent(workspace_id=scope,
+                                                  after_seq=after):
+                    yield _sse({"type": "message", "team_id": message["team_id"],
+                                "id": message["seq"], "payload": message})
+                idle = 0
+                while True:
+                    try:
+                        event = sub.get(timeout=15)
+                    except queue.Empty:
+                        idle += 1
+                        yield ": ping\n\n"
+                        if idle > 40:
+                            return
+                        continue
+                    idle = 0
+                    if event.get("workspace_id") not in (scope, None):
+                        continue
+                    yield _sse(event)
+            finally:
+                runtime.hub.unsubscribe(sub)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    def _sse(event: dict) -> str:
+        import json
+
+        payload = json.dumps(event, ensure_ascii=False, default=str)
+        ident = event.get("id")
+        # 只有总线 seq 是单调游标；实体 id 当游标会让 Last-Event-ID 无法解析
+        cursor = f"id: {ident}\n" if isinstance(ident, int) else ""
+        return cursor + f"data: {payload}\n\n"
+
+    def _crew_action(request: Request, team_id: str, action: str) -> dict:
+        principal = _principal(request)
+        runtime = _runtime(request)
+        _require_team(runtime, team_id)
+        handler = getattr(runtime.crew, action)
+        return handler(team_id, actor=principal.username)
+
+    def _require_team(runtime, team_id: str) -> dict:
+        team = runtime.teams.get_team(team_id)
+        if team is None:
+            raise HTTPException(404, "团队不存在")
+        return team
 
     return app
 

@@ -10,7 +10,7 @@ try {
     ? "light" : "dark";
 } catch (_) { document.documentElement.dataset.theme = "dark"; }
 </script>
-<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="style.css?v=27">
 </head>
 <body>
 
@@ -29,6 +29,7 @@ try {
   <nav class="nav-tabs">
     <button id="nav-agents" class="on">智能体</button>
     <button id="nav-flows">工作流画布</button>
+    <button id="nav-dh">数字人</button>
   </nav>
   <div class="spacer"></div>
   <div class="nav-actions">
@@ -139,6 +140,71 @@ try {
     <div id="insp-body"></div>
   </aside>
 </div>
+
+<!-- 数字人舞台视图：以数字人形象实时呈现流程运行与消息透传 -->
+<section id="dh-view" class="view-hidden app-authenticated">
+  <aside id="dh-side">
+    <div id="dh-side-head">
+      <h1>数字人舞台</h1>
+      <p>每个节点是一位数字人；运行流程，实时看到他们的状态与消息往来。</p>
+    </div>
+    <div id="dh-controls">
+      <select id="dh-flow-select" title="选择要观看的流程"></select>
+      <div class="dh-btn-row">
+        <button id="dh-run" class="primary" title="运行选中的流程">▶ 运行</button>
+        <button id="dh-refresh" title="刷新流程与运行列表">↻ 刷新</button>
+      </div>
+      <div id="dh-layouts" role="group" aria-label="舞台布局">
+        <button data-layout="tree">树形工位</button>
+        <button data-layout="circle">圆形工位</button>
+        <button data-layout="graph">原图布局</button>
+      </div>
+      <div id="dh-live" role="status"></div>
+    </div>
+    <div id="dh-team-box">
+      <h3>团队任务 · 多智能体联动</h3>
+      <textarea id="dh-team-task" rows="2"
+        placeholder="给一个任务，如：给我们的记账 App 做一次上线推广，含产品材料、开发落地、测试与销售话术"></textarea>
+      <div class="dh-btn-row">
+        <button id="dh-team-compose" class="primary">编制团队</button>
+        <button id="dh-team-start" title="启动协作（项目经理按轮次派活）">▶ 启动</button>
+      </div>
+      <div class="dh-btn-row">
+        <button id="dh-team-pause" title="轮边界暂停">⏸ 暂停</button>
+        <button id="dh-team-resume" title="恢复协作">↻ 恢复</button>
+        <button id="dh-team-stop" title="停止并保留历史">■ 停止</button>
+      </div>
+      <div id="dh-teams"></div>
+    </div>
+    <div id="dh-runs-wrap">
+      <h3>流程运行</h3>
+      <div id="dh-runs"></div>
+    </div>
+  </aside>
+
+  <div id="dh-stage-wrap">
+    <div id="dh-banner" class="view-hidden" role="status"></div>
+    <div id="dh-stage">
+      <svg id="dh-edges" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="dh-world"></div>
+      <div id="dh-empty" class="dh-empty">选择左侧一条运行记录，或点「▶ 运行」开始。
+        运行中的流程会自动出现在舞台上。</div>
+    </div>
+    <div id="dh-stage-note"></div>
+  </div>
+
+  <aside id="dh-feed-side">
+    <div id="dh-feed-head">
+      <h3>消息透传</h3>
+      <span id="dh-feed-count">0</span>
+    </div>
+    <div id="dh-feed" role="log" aria-label="节点间消息"></div>
+    <div id="dh-feed-input-row">
+      <input id="dh-feed-input" placeholder="以老板身份给全员下指示…">
+      <button id="dh-feed-send" class="primary">发送</button>
+    </div>
+  </aside>
+</section>
 
 <!-- 智能体对话面板 -->
 <aside id="chat-panel">

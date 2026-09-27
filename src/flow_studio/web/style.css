@@ -849,3 +849,224 @@ video.media-thumb { background: #000; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ================= 数字人舞台 ================= */
+#dh-view {
+  display: grid; grid-template-columns: 248px minmax(0, 1fr) 312px;
+  gap: 12px; padding: 12px; height: calc(100dvh - 54px);
+}
+#dh-side, #dh-feed-side {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+#dh-side-head { padding: 14px 14px 8px; }
+#dh-side-head h1 { font-size: 17px; margin: 0 0 4px; }
+#dh-side-head p { margin: 0; font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+#dh-controls { padding: 10px 14px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+#dh-controls select { width: 100%; }
+.dh-btn-row { display: flex; gap: 8px; }
+.dh-btn-row button { flex: 1; }
+#dh-layouts {
+  display: flex; gap: 4px; padding: 3px; border-radius: 8px;
+  background: var(--nav-tabs-bg);
+}
+#dh-layouts button { flex: 1; padding: 5px 0; font-size: 12px; border-radius: 6px; color: var(--ink-2); }
+#dh-layouts button.on { background: var(--nav-active-bg); color: var(--nav-active-ink); }
+#dh-live { font-size: 12px; color: var(--ink-2); min-height: 16px; }
+#dh-runs-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 8px 8px 14px; }
+#dh-runs-wrap h3 { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
+#dh-runs { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 6px; }
+.dh-run-item {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px;
+  align-items: center; text-align: left; padding: 8px 10px; border-radius: 8px;
+  background: var(--panel-2); border: 1px solid var(--line); cursor: pointer;
+}
+.dh-run-item:hover { border-color: var(--hover-line); }
+.dh-run-item.on { border-color: var(--accent); background: var(--accent-soft); }
+.dh-run-item b { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dh-run-item time { grid-column: 2; font-size: 11px; color: var(--ink-3); }
+.dh-chip {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  border: 1px solid var(--line-2); color: var(--ink-2);
+}
+.dh-chip[data-status="running"], .dh-chip[data-status="queued"] {
+  color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft);
+}
+.dh-chip[data-status="success"] { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+.dh-chip[data-status="failed"], .dh-chip[data-status="interrupted"] {
+  color: var(--err); border-color: var(--err-line); background: var(--err-soft);
+}
+.dh-chip[data-status="skipped"] { color: var(--skip); border-color: var(--skip-line); background: var(--skip-soft); }
+
+#dh-stage-wrap { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+#dh-banner {
+  flex: none; padding: 9px 14px; border-radius: var(--radius); cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#dh-banner[data-status="success"] { border-color: var(--ok-line); color: var(--ok); }
+#dh-banner[data-status="failed"], #dh-banner[data-status="interrupted"] {
+  border-color: var(--err-line); color: var(--err);
+}
+#dh-banner[data-status="running"] { border-color: var(--warn-line); color: var(--warn); }
+#dh-banner[data-replay]::after {
+  content: "⟲ 点击回放"; margin-left: 10px; font-size: 11.5px;
+  color: var(--accent); border: 1px solid var(--accent-ring);
+  padding: 1px 8px; border-radius: 999px;
+}
+#dh-stage {
+  position: relative; flex: 1; min-height: 0; overflow: hidden;
+  border-radius: var(--radius); border: 1px solid var(--line);
+  background:
+    radial-gradient(ellipse 60% 42% at 50% 88%, var(--hero-glow), transparent 70%),
+    var(--bg);
+}
+#dh-edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+.dh-edge {
+  fill: none; stroke: var(--edge); stroke-width: 1.6;
+  stroke-dasharray: 5 5; stroke-linecap: round;
+}
+.dh-edge-label {
+  fill: var(--ink-3); font-size: 10.5px; text-anchor: middle;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px;
+}
+#dh-world { position: absolute; inset: 0; }
+.dh-empty { padding: 14px; color: var(--ink-3); font-size: 12.5px; }
+
+.dh-avatar {
+  position: absolute; width: 110px;
+  transform: scale(var(--dhs, 1)); transform-origin: 50% 72%;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  cursor: pointer; user-select: none;
+}
+.dh-scene { position: relative; width: 110px; height: 140px; }
+.dh-pad {
+  position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%);
+  width: 158px; height: 112px; border-radius: 16px; z-index: 0;
+  background: color-mix(in srgb, var(--dh) 12%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--dh) 38%, transparent);
+}
+.dh-person {
+  position: absolute; left: 12px; bottom: 2px; width: 86px; height: 136px; z-index: 1;
+  transition: transform .8s ease-in-out; will-change: transform;
+}
+.dh-fig { width: 100%; height: 100%; position: relative; }
+.dh-fig svg, .dh-person svg { width: 100%; height: 100%; overflow: visible; display: block; }
+.dh-desk { position: absolute; left: 0; bottom: 0; width: 110px; height: 60px; z-index: 2; }
+.dh-mon { fill: var(--code-bg); stroke: var(--dh); stroke-width: 1.4; }
+.dh-mon-screen { fill: var(--dh); opacity: .25; }
+.dh-mon-stand, .dh-desk-leg { fill: var(--ink-3); }
+.dh-desk-top { fill: var(--panel-2); stroke: var(--line-2); stroke-width: 1; }
+.dh-leg { transform-box: fill-box; transform-origin: 50% 6%; }
+.dh-arm { transform-box: fill-box; transform-origin: 50% 6%; }
+.dh-ground { fill: rgba(0, 0, 0, .38); }
+.dh-ring { fill: none; stroke: var(--dh); stroke-width: 1.5; stroke-dasharray: 4 5; opacity: .55; }
+.dh-eyes { transform-box: fill-box; transform-origin: center;
+  animation: dh-blink 4.6s ease-in-out infinite; }
+.dh-avatar .dh-fig svg { transition: filter .25s; }
+
+/* 状态：等待 → 待机呼吸 → 执行中 → 终态 */
+.dh-avatar.is-waiting .dh-fig { opacity: .5; filter: saturate(.4); }
+.dh-avatar.is-idle .dh-fig { animation: dh-breathe 4.2s ease-in-out infinite; }
+.dh-avatar.is-running .dh-fig { animation: dh-bob 1.1s ease-in-out infinite; filter: drop-shadow(0 0 10px var(--dh)); }
+.dh-avatar.is-running .dh-ring { opacity: .9; animation: dh-ring 1.2s ease-in-out infinite; }
+.dh-avatar.is-running .dh-eyes { animation: dh-blink 1.4s ease-in-out infinite; }
+.dh-avatar.is-walking { z-index: 40; }
+.dh-avatar.is-walking .dh-fig { animation: dh-bob .42s ease-in-out infinite; }
+.dh-avatar.is-walking .dh-leg-l { animation: dh-step .42s ease-in-out infinite; }
+.dh-avatar.is-walking .dh-leg-r { animation: dh-step .42s ease-in-out infinite reverse; }
+.dh-avatar.is-walking .dh-arm-l { animation: dh-swing .42s ease-in-out infinite; }
+.dh-avatar.is-walking .dh-arm-r { animation: dh-swing .42s ease-in-out infinite reverse; }
+.dh-avatar.is-success .dh-fig { filter: drop-shadow(0 0 8px var(--ok)); }
+.dh-avatar.is-success .dh-ring { stroke: var(--ok); }
+.dh-avatar.is-failed .dh-fig { filter: drop-shadow(0 0 8px var(--err)); }
+.dh-avatar.is-failed .dh-ring { stroke: var(--err); }
+.dh-avatar.is-skipped .dh-fig { opacity: .55; filter: grayscale(.7); }
+.dh-avatar.dh-arrive .dh-fig { animation: dh-arrive .65s ease-out; }
+.dh-avatar.dh-pulse .dh-fig { animation: dh-arrive .65s ease-out; }
+@keyframes dh-breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+@keyframes dh-bob { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.02); } }
+@keyframes dh-ring { 0%, 100% { stroke-dashoffset: 0; } 50% { stroke-dashoffset: -9; } }
+@keyframes dh-step { 0%, 100% { transform: rotate(15deg); } 50% { transform: rotate(-15deg); } }
+@keyframes dh-swing { 0%, 100% { transform: rotate(9deg); } 50% { transform: rotate(-9deg); } }
+@keyframes dh-blink { 0%, 92%, 100% { transform: scaleY(1); } 96% { transform: scaleY(.08); } }
+@keyframes dh-arrive {
+  0% { transform: scale(1); } 40% { transform: scale(1.09); } 100% { transform: scale(1); }
+}
+
+.dh-plate { text-align: center; max-width: 128px; pointer-events: none; }
+.dh-plate b {
+  display: block; font-size: 12px; line-height: 1.3; color: var(--ink);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
+.dh-plate span {
+  font-size: 10.5px; color: var(--dh); opacity: .9;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.dh-bubble {
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  max-width: 210px; width: max-content; padding: 7px 10px; border-radius: 9px;
+  background: var(--panel-2); border: 1px solid var(--dh);
+  box-shadow: var(--shadow); font-size: 11.5px; line-height: 1.45; color: var(--ink);
+  z-index: 5; pointer-events: none;
+  animation: dh-pop .18s ease-out;
+}
+.dh-bubble::after {
+  content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: var(--dh);
+}
+@keyframes dh-pop { from { opacity: 0; transform: translateX(-50%) translateY(4px); } }
+
+#dh-stage-note { flex: none; font-size: 11.5px; color: var(--ink-3); min-height: 14px; }
+
+#dh-feed-head {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px;
+  border-bottom: 1px solid var(--line);
+}
+#dh-feed-head h3 { margin: 0; font-size: 13px; flex: 1; }
+#dh-feed-count { font-size: 11px; color: var(--ink-3); }
+#dh-feed { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.dh-msg {
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; background: var(--panel-2); padding: 6px 9px; cursor: pointer;
+}
+.dh-msg[data-level="error"] { border-left-color: var(--err); }
+.dh-msg[data-level="warning"] { border-left-color: var(--warn); }
+.dh-msg:hover { border-color: var(--hover-line); }
+.dh-msg.dh-msg-hit { border-color: var(--accent); background: var(--accent-soft); }
+.dh-msg-meta {
+  display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; color: var(--ink-3);
+}
+.dh-msg-meta b { color: var(--ink-2); font-size: 11.5px; flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dh-msg-kind { flex: none; }
+.dh-msg pre {
+  margin: 3px 0 0; font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; color: var(--ink);
+}
+
+@media (max-width: 1100px) {
+  #dh-view { grid-template-columns: 210px minmax(0, 1fr) 250px; }
+}
+@media (max-width: 860px) {
+  #dh-view {
+    grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(300px, 52vh) minmax(140px, 1fr);
+    height: auto; min-height: calc(100dvh - 54px);
+  }
+  #dh-runs-wrap { max-height: 180px; }
+}
+
+/* 团队任务 · 多智能体联动 */
+#dh-team-box {
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
+  display: grid; gap: 8px;
+}
+#dh-team-box h3 { margin: 0; font-size: 13px; color: var(--ink-2); }
+#dh-team-box textarea {
+  width: 100%; resize: vertical; font-size: 12.5px; line-height: 1.5;
+}
+#dh-teams { display: flex; flex-direction: column; gap: 6px; max-height: 150px; overflow-y: auto; }
+#dh-feed-input-row {
+  display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line);
+}
+#dh-feed-input-row input { flex: 1; min-width: 0; }

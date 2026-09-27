@@ -42,6 +42,17 @@ DEFAULT_POLICY = {
     "require_approval": True,
     "required_eval_suite_id": "",
     "min_eval_pass_rate": 1.0,
+    "workforce": {
+        "enabled": True,
+        "max_teams": 5,
+        "max_members": 8,
+        "max_rounds": 12,
+        "max_messages_per_round": 40,
+        "max_cards": 30,
+        "allowed_roles": [],
+        "auto_create_agents": True,
+        "allow_human_messages": True,
+    },
 }
 
 _SECRET_KEYS = {

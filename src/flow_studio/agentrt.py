@@ -481,6 +481,24 @@ class AgentRuntime:
                 connection.get("base_url") or self.bridge_cfg.get("base_url")
                 or "http://127.0.0.1:3000", token,
                 timeout=float(self.bridge_cfg.get("timeout") or 300))
+            # 按 CA 目录过滤选择项：跨系统工具/技能 id 不一致时拒单不如静默裁剪
+            # （例如团队协作会把本地协作工具并进 tool_ids，而它们只存在于本侧）。
+            try:
+                catalog = provider.catalog()
+            except Exception as exc:  # noqa: BLE001 目录不可达交由运行时自行报错
+                log.warning("Customer Agent 目录拉取失败，跳过选择项过滤：%s", exc)
+                catalog = {}
+            known_tools = {str(t.get("id") or "") for t in catalog.get("tools") or []}
+            known_skills = {str(s.get("id") or "") for s in catalog.get("skills") or []}
+            known_mcp = {str(m.get("id") or "") for m in catalog.get("mcpServers") or []}
+            known_models = {str(m.get("id") or "") for m in catalog.get("models") or []}
+            selected_tool_ids = [str(t) for t in (selection.get("tool_ids") or [])
+                                 if str(t) in known_tools]
+            selected_mcp_ids = [str(m) for m in (selection.get("mcp_server_ids") or [])
+                                if str(m) in known_mcp]
+            skill_ids = [str(s) for s in skill_ids
+                         if not known_skills or str(s) in known_skills]
+            selected_model = profile_id if profile_id in known_models else ""
             steps = []
 
             def observe(event_type, event):
@@ -515,11 +533,11 @@ class AgentRuntime:
                 context={**(context or {}), "flowRunId": flow_run_id,
                          "agentId": agent.get("id")},
                 selection={
-                    "modelId": profile_id,
+                    **({"modelId": selected_model} if selected_model else {}),
                     "skillIds": skill_ids,
                     "activatedSkillIds": [requested_skill] if requested_skill else [],
-                    "toolIds": list(selection.get("tool_ids") or []),
-                    "mcpServerIds": list(selection.get("mcp_server_ids") or []),
+                    "toolIds": selected_tool_ids,
+                    "mcpServerIds": selected_mcp_ids,
                     "memoryEnabled": bool(selection.get("memory_enabled")),
                     **({"toolPolicyId": str(selection["tool_policy_id"])}
                        if str(selection.get("tool_policy_id") or "").strip()

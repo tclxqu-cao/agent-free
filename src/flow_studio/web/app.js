@@ -160,10 +160,14 @@ function applyPermissions() {
   ["#agents-new", "#flows-new", "#btn-new", "#btn-del", "#btn-save", "#btn-models", "#media-upload-btn"]
     .forEach(selector => { const el = $(selector); if (el) el.hidden = !writable; });
   $("#btn-gov").hidden = !(can("release.approve") || can("audit.read") || writable);
+  const runButton = $("#dh-run");
+  if (runButton) runButton.hidden = !writable;
 }
 
 async function loadApplicationData() {
   stopRunTracking(true);
+  dhLeave();
+  dh.runId = ""; dh.run = null; dh.graph = null; dh.events = []; dh.playing = false;
   state.graph = null; state.lastRun = null; state.govResource = null; state.dirty = false;
   state.kbDocs = {}; state.mcpTools = {}; state.chatTarget = null;
   ["#gov-panel", "#res-panel", "#media-panel", "#chat-panel"]
@@ -2400,24 +2404,1000 @@ $("#media-upload-input").onchange = async e => {
   toast("上传完成 ✅", "ok");
 };
 
+/* ================= 数字人舞台 =================
+ * 每个节点是一位数字人：图快照给布局，运行事件流给表演；
+ * 消息沿边飞行（粒子），透传内容进右侧消息流。零后端改动，全部复用既有 API。 */
+const DH_ROLE = { start: "接待", end: "司仪", condition: "导演", intent: "导演",
+  llm: "模型师", agent: "执行师", ai_agent: "智能体", brain: "我的 Agent",
+  boss: "老板", product: "产品经理", architect: "技术架构", developer: "开发",
+  qa: "测试", ops: "运维", sales: "销售" };
+const DH_STATE_CLASS = ["is-waiting", "is-idle", "is-running", "is-success",
+  "is-failed", "is-skipped"];
+const dh = {
+  mon: { generation: 0, timer: null, controller: null, seq: 0, retries: 0 },
+  scanTimer: null,      // 运行记录轮询
+  flowId: localStorage.getItem("dh-flow") || "",
+  layoutMode: localStorage.getItem("dh-layout") || "tree",
+  runId: "", run: null, graph: null, events: [],
+  playing: false,       // 回放中（暂停自动接管与重放入口）
+  pos: null,            // node_id → 工位舞台坐标
+  scale: 1,             // 密度高时的整体缩放（--dhs）
+  roleMeta: {},         // 团队模式：role key → {name, color, icon}
+  els: new Map(),       // node_id → {wrap, bubble, hideTimer}
+  feed: { count: 0 },
+};
+const dhReducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const dhStale = generation => generation !== dh.mon.generation || state.viewMode !== "dh";
+
+function dhRoleWord(type) {
+  return dh.roleMeta?.[type]?.name || DH_ROLE[type]
+    || state.nodeTypes[type]?.label || type;
+}
+function dhTypeColor(type) {
+  return dh.roleMeta?.[type]?.color || state.nodeTypes[type]?.color
+    || TYPE_HUES[type] || "#8b98f8";
+}
+
+/* ---- 数字人形象：写实半身像（肤色/发型/发色按序号变化，纯 SVG 无外部资源） ---- */
+const DH_SKIN = ["#f7ddc3", "#eec9a0", "#d9a878", "#b98a5e"];
+const DH_HAIR = ["#2c2620", "#15181d", "#5d4230", "#8a6a45", "#3d434f"];
+function dhShade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = v => Math.max(0, Math.min(255, Math.round(v * f)));
+  return `#${((1 << 24) + (c(n >> 16) << 16) + (c((n >> 8) & 255) << 8) + c(n & 255))
+    .toString(16).slice(1)}`;
+}
+function dhFigureSvg(color, idx) {
+  const skin = DH_SKIN[idx % DH_SKIN.length];
+  const hair = DH_HAIR[(idx * 3 + 1) % DH_HAIR.length];
+  const style = idx % 3;                    // 0 短发 · 1 长发 · 2 束发
+  const flip = idx % 2 === 1 ? ' style="transform:scaleX(-1)"' : "";
+  const skinHi = dhShade(skin, 1.12), skinLo = dhShade(skin, .8);
+  const hairLo = dhShade(hair, .55), clothLo = dhShade(color, .6), clothHi = dhShade(color, 1.25);
+  const gid = s => `dhg-${s}${idx}`;
+  const backHair = style === 1 ? `
+    <path d="M43,44 C40,78 44,98 53,106 L62,106 C53,94 50,70 50,50 Z" fill="${dhShade(hair, .8)}"/>
+    <path d="M97,44 C100,78 96,98 87,106 L78,106 C87,94 90,70 90,50 Z" fill="${dhShade(hair, .8)}"/>` : "";
+  const bun = style === 2 ? `
+    <circle cx="70" cy="13" r="8" fill="${hair}"/>
+    <rect x="65" y="18" width="10" height="3" rx="1.5" fill="${color}" opacity=".85"/>` : "";
+  return `<svg viewBox="0 0 140 190" aria-hidden="true"${flip}>
+    <defs>
+      <radialGradient id="${gid("face")}" cx="0.5" cy="0.4" r="0.78">
+        <stop offset="0" stop-color="${skinHi}"/>
+        <stop offset="0.72" stop-color="${skin}"/>
+        <stop offset="1" stop-color="${skinLo}"/>
+      </radialGradient>
+      <linearGradient id="${gid("cloth")}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${clothHi}"/><stop offset="1" stop-color="${clothLo}"/>
+      </linearGradient>
+    </defs>
+    <ellipse class="dh-ground" cx="70" cy="178" rx="32" ry="4.5"/>
+    <ellipse class="dh-ring" cx="70" cy="177" rx="38" ry="6"/>
+    ${backHair}
+    <g class="dh-legs">
+      <rect class="dh-leg dh-leg-l" x="56" y="140" width="13" height="34" rx="6" fill="${clothLo}"/>
+      <rect class="dh-leg dh-leg-r" x="74" y="140" width="13" height="34" rx="6" fill="${clothLo}"/>
+      <ellipse cx="62" cy="176" rx="8" ry="3.5" fill="#232732"/>
+      <ellipse cx="81" cy="176" rx="8" ry="3.5" fill="#232732"/>
+    </g>
+    <path d="M62,70 L78,70 L78,90 C74,95 66,95 62,90 Z" fill="url(#${gid("face")})"/>
+    <path d="M62,70 L78,70 L78,78 C73,82 67,82 62,78 Z" fill="rgba(0,0,0,.12)"/>
+    <path d="M40,150 C42,116 52,102 64,96 L76,96 C88,102 98,116 100,150 Z" fill="url(#${gid("cloth")})"/>
+    <path d="M52,116 C54,127 54,139 52,147" stroke="rgba(0,0,0,.1)" stroke-width="2.5"
+      fill="none" stroke-linecap="round"/>
+    <path d="M88,114 C86,126 86,139 88,147" stroke="rgba(0,0,0,.1)" stroke-width="2.5"
+      fill="none" stroke-linecap="round"/>
+    <path d="M56,97 L70,115 L84,97 C79,93.5 61,93.5 56,97 Z" fill="rgba(244,246,250,.92)"/>
+    <rect x="69" y="115" width="2" height="33" rx="1" fill="rgba(0,0,0,.16)"/>
+    <path d="M48,122 C52,108 58,101 64,98" stroke="rgba(255,255,255,.14)" stroke-width="3"
+      fill="none" stroke-linecap="round"/>
+    <path d="M92,122 C88,108 82,101 76,98" stroke="rgba(255,255,255,.14)" stroke-width="3"
+      fill="none" stroke-linecap="round"/>
+    <path class="dh-arm dh-arm-l" d="M48,103 C41,118 38,140 42,152" stroke="${clothLo}"
+      stroke-width="11" fill="none" stroke-linecap="round"/>
+    <path class="dh-arm dh-arm-r" d="M92,103 C98,118 102,140 98,152" stroke="${clothLo}"
+      stroke-width="11" fill="none" stroke-linecap="round"/>
+    <circle cx="42" cy="157" r="5" fill="${skin}"/>
+    <circle cx="98" cy="157" r="5" fill="${skin}"/>
+    <circle cx="45.5" cy="55" r="4.2" fill="${skin}"/>
+    <circle cx="94.5" cy="55" r="4.2" fill="${skin}"/>
+    <ellipse cx="70" cy="52" rx="24" ry="27" fill="url(#${gid("face")})"/>
+    <path d="M84,32 C90,38 93,46 92,55 C91,66 86,74 78,77 C86,74 91,64 91,54 C91,44 88,37 84,32 Z"
+      fill="rgba(0,0,0,.08)"/>
+    <ellipse cx="70" cy="77" rx="10" ry="3" fill="rgba(0,0,0,.05)"/>
+    <path d="M55,47.5 Q60,45.2 65,47.2" stroke="${hairLo}" stroke-width="2" fill="none"
+      stroke-linecap="round"/>
+    <path d="M75,47.2 Q80,45.2 85,47.5" stroke="${hairLo}" stroke-width="2" fill="none"
+      stroke-linecap="round"/>
+    <g class="dh-eyes">
+      <ellipse cx="60" cy="54" rx="4.8" ry="3.2" fill="#fff"/>
+      <ellipse cx="80" cy="54" rx="4.8" ry="3.2" fill="#fff"/>
+      <circle cx="60.8" cy="54.2" r="2.3" fill="#3c332b"/>
+      <circle cx="80.8" cy="54.2" r="2.3" fill="#3c332b"/>
+      <circle cx="60.8" cy="54.2" r="1.1" fill="#1a1512"/>
+      <circle cx="80.8" cy="54.2" r="1.1" fill="#1a1512"/>
+      <circle cx="61.7" cy="53.3" r=".8" fill="#fff"/>
+      <circle cx="81.7" cy="53.3" r=".8" fill="#fff"/>
+      <path d="M55.4,52.4 Q60,50.2 64.6,52.4" stroke="rgba(0,0,0,.28)" stroke-width="1"
+        fill="none" stroke-linecap="round"/>
+      <path d="M75.4,52.4 Q80,50.2 84.6,52.4" stroke="rgba(0,0,0,.28)" stroke-width="1"
+        fill="none" stroke-linecap="round"/>
+    </g>
+    <path d="M70,56 Q68.4,61 70.4,63.4" stroke="${skinLo}" stroke-width="1.4" fill="none"
+      stroke-linecap="round" opacity=".85"/>
+    <circle cx="67.6" cy="63.8" r=".7" fill="rgba(0,0,0,.18)"/>
+    <circle cx="72.4" cy="63.8" r=".7" fill="rgba(0,0,0,.18)"/>
+    <ellipse cx="54.5" cy="62.5" rx="3.4" ry="2" fill="#e58a7a" opacity=".2"/>
+    <ellipse cx="85.5" cy="62.5" rx="3.4" ry="2" fill="#e58a7a" opacity=".2"/>
+    <path d="M63,69.3 Q70,66.6 77,69.3" stroke="#9c5a4e" stroke-width="1.7" fill="none"
+      stroke-linecap="round"/>
+    <path d="M64.5,70.4 Q70,73.6 75.5,70.4" stroke="#b96b5c" stroke-width="1.7" fill="none"
+      stroke-linecap="round" opacity=".85"/>
+    <path d="M47,52 C45,24 57,15 70,15 C83,15 95,24 93,52 C90,34 82,27 70,27 C58,27 50,34 47,52 Z"
+      fill="${hair}"/>
+    <path d="M52,29 C56,23 62,20 68,19.5" stroke="rgba(255,255,255,.22)" stroke-width="2.4"
+      fill="none" stroke-linecap="round"/>
+    ${bun}
+  </svg>`;
+}
+
+function dhAvatarHtml(node, idx) {
+  const color = dhTypeColor(node.type);
+  const meta = state.nodeTypes[node.type] || {};
+  return `<div class="dh-avatar" data-node="${esc(node.id)}" style="--dh:${esc(color)}">
+    <div class="dh-bubble" hidden></div>
+    <div class="dh-scene">
+      <div class="dh-pad"></div>
+      <div class="dh-person"><div class="dh-fig">${dhFigureSvg(color, idx)}</div></div>
+      <svg class="dh-desk" viewBox="0 0 110 60" aria-hidden="true">
+        <rect class="dh-mon" x="30" y="1" width="50" height="26" rx="4"/>
+        <rect class="dh-mon-screen" x="34" y="5" width="42" height="18" rx="2"/>
+        <rect class="dh-mon-stand" x="52" y="27" width="6" height="6"/>
+        <rect class="dh-desk-top" x="0" y="33" width="110" height="8" rx="3"/>
+        <rect class="dh-desk-leg" x="8" y="41" width="6" height="19"/>
+        <rect class="dh-desk-leg" x="96" y="41" width="6" height="19"/>
+      </svg>
+    </div>
+    <div class="dh-plate">
+      <b>${esc(node.label || node.id)}</b>
+      <span><i>${esc(meta.icon || "•")}</i>${esc(dhRoleWord(node.type))}</span>
+    </div>
+  </div>`;
+}
+
+/* ---- 舞台布局：工位坐标（树形 / 圆形 / 原图） ---- */
+function dhBfs(nodes, edges) {
+  const kids = new Map(nodes.map(n => [n.id, []]));
+  for (const e of edges || []) {
+    if (kids.has(e.from) && kids.has(e.to) && e.from !== e.to) kids.get(e.from).push(e.to);
+  }
+  const order = [], depth = new Map();
+  const start = nodes.find(n => n.type === "start")?.id;
+  if (start) { depth.set(start, 0); order.push(start); }
+  for (let i = 0; i < order.length; i++) {
+    for (const k of kids.get(order[i]) || []) {
+      if (!depth.has(k)) { depth.set(k, depth.get(order[i]) + 1); order.push(k); }
+    }
+  }
+  for (const n of nodes) if (!depth.has(n.id)) {   // 不可达节点挂到当前队尾层
+    depth.set(n.id, depth.get(order[order.length - 1]) ?? 0);
+    order.push(n.id);
+  }
+  return { order, depth };
+}
+
+function dhComputePositions(nodes, edges, mode, W, H) {
+  if (mode === "graph") {   // 沿用画布快照坐标
+    dh.scale = 1;
+    const xs = nodes.map(n => n.pos?.x ?? 0), ys = nodes.map(n => n.pos?.y ?? 0);
+    const bw = Math.max(1, Math.max(...xs) - Math.min(...xs));
+    const bh = Math.max(1, Math.max(...ys) - Math.min(...ys));
+    const s = Math.min(1.15, (W - 180) / bw, (H - 230) / bh);
+    const ox = (W - bw * s) / 2 - Math.min(...xs) * s;
+    const oy = (H - bh * s) / 2 - Math.min(...ys) * s;
+    return Object.fromEntries(nodes.map(n => [n.id, {
+      x: (n.pos?.x ?? 0) * s + ox, y: (n.pos?.y ?? 0) * s + oy }]));
+  }
+  const { order, depth } = dhBfs(nodes, edges);
+  if (mode === "circle") {  // 全员围成椭圆，按 BFS 序相邻成环
+    dh.scale = 1;
+    const cx = W / 2, cy = H / 2 + 4;
+    const rx = Math.max(130, Math.min(W / 2 - 95, 430));
+    const ry = Math.max(70, Math.min(H / 2 - 164, 300));
+    return Object.fromEntries(order.map((id, i) => {
+      const a = -Math.PI / 2 + i * 2 * Math.PI / order.length;
+      return [id, { x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) }];
+    }));
+  }
+  // tree：办公室大排布 —— BFS 序折行（蛇形），行内大间距、行间留过道；
+  // 间距不够时整体等比缩放（--dhs），保证工位之间始终分开。
+  dh.scale = 1;
+  const maxRowLen = Math.max(2, Math.ceil(Math.sqrt(order.length * 1.6)));
+  const rows = [];
+  let cur = [];
+  for (const id of order) {
+    cur.push(id);
+    if (cur.length === maxRowLen) { rows.push(cur); cur = []; }
+  }
+  if (cur.length) rows.push(cur);
+  const gridW = Math.max(...rows.map(r => r.length)) * 260;
+  const gridH = rows.length * 230;
+  dh.scale = Math.max(0.58, Math.min(1, (W - 110) / gridW, (H - 90) / gridH));
+  const s = dh.scale, out = {};
+  rows.forEach((r, ri) => {
+    const seq = ri % 2 === 0 ? r : [...r].reverse();
+    seq.forEach((id, i) => {
+      const col = ri % 2 === 0 ? i : r.length - 1 - i;
+      out[id] = { x: W / 2 + (col - (r.length - 1) / 2) * 260 * s,
+                  y: H / 2 + (ri - (rows.length - 1) / 2) * 230 * s };
+    });
+  });
+  return out;
+}
+
+function dhPoint(nodeId) {
+  const pos = dh.pos?.[nodeId];
+  if (!pos) return null;
+  // 锚在人像胸口高度：边线走身形后面的"舞台地线"
+  return { x: pos.x, y: pos.y + 70 };
+}
+
+function dhPlaceAvatar(node, idx) {
+  const wrap = document.createElement("div");
+  wrap.innerHTML = dhAvatarHtml(node, idx);
+  const el = wrap.firstElementChild;
+  el.classList.add("is-waiting");
+  el.dataset.label = node.label || node.id;
+  const pos = dh.pos[node.id] || { x: 100 + (idx % 4) * 150, y: 110 + Math.floor(idx / 4) * 200 };
+  el.style.left = `${pos.x - 55}px`;
+  el.style.top = `${pos.y - 24}px`;
+  el.addEventListener("click", () => dhFocusNode(node.id));
+  $("#dh-world").append(el);
+  dh.els.set(node.id, { wrap: el, bubble: el.querySelector(".dh-bubble"), hideTimer: null });
+}
+
+function dhDrawEdge(edge) {
+  const from = dhPoint(edge.from), to = dhPoint(edge.to);
+  if (!from || !to) return;
+  const bend = Math.max(40, Math.abs(to.x - from.x) * 0.38);
+  const path = document.createElementNS(svgNS, "path");
+  path.setAttribute("d", `M ${from.x} ${from.y} C ${from.x + bend} ${from.y},`
+    + ` ${to.x - bend} ${to.y}, ${to.x} ${to.y}`);
+  path.setAttribute("class", "dh-edge");
+  path.dataset.from = edge.from; path.dataset.to = edge.to;
+  $("#dh-edges").append(path);
+  const branch = String(edge.branch || "").trim();
+  if (branch && branch.toLowerCase() !== "else") {
+    const mid = path.getPointAtLength(path.getTotalLength() / 2);
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", mid.x); label.setAttribute("y", mid.y - 6);
+    label.setAttribute("class", "dh-edge-label");
+    label.textContent = branch;
+    $("#dh-edges").append(label);
+  }
+}
+
+function dhBuildStage(run) {
+  $("#dh-world").replaceChildren();
+  $("#dh-edges").replaceChildren();
+  dh.els.clear(); dh.graph = null; dh.pos = null;
+  $("#dh-stage-note").textContent = "";
+  const nodes = run?.graph?.nodes;
+  if (!nodes?.length) {
+    const roster = (run?.node_runs || []).map(n => ({ id: n.node_id, type: n.type,
+      label: n.label || n.node_id }));
+    if (!roster.length) { $("#dh-empty").classList.remove("view-hidden"); return; }
+    $("#dh-stage-note").textContent = "该运行没有保存执行图快照，按名册排列工位。";
+    const stage = $("#dh-stage");
+    const W = stage.clientWidth || 900, H = stage.clientHeight || 560;
+    dh.pos = Object.fromEntries(roster.map((n, i) => [n.id,
+      { x: 110 + (i % 4) * ((W - 220) / 3), y: 110 + Math.floor(i / 4) * 190 }]));
+    dh.scale = 1;
+    dhApplyStageScale();
+    roster.forEach((n, i) => dhPlaceAvatar(n, i));
+    $("#dh-empty").classList.add("view-hidden");
+    return;
+  }
+  dh.graph = run.graph;
+  const stage = $("#dh-stage");
+  const W = stage.clientWidth || 900, H = stage.clientHeight || 560;
+  $("#dh-edges").setAttribute("viewBox", `0 0 ${W} ${H}`);
+  dh.pos = dhComputePositions(nodes, run.graph.edges || [], dh.layoutMode, W, H);
+  dhApplyStageScale();
+  nodes.forEach((n, i) => dhPlaceAvatar(n, i));
+  for (const edge of run.graph.edges || []) dhDrawEdge(edge);
+  $("#dh-empty").classList.add("view-hidden");
+}
+
+function dhApplyStageScale() {
+  $("#dh-stage").style.setProperty("--dhs", (dh.scale ?? 1).toFixed(3));
+}
+
+function dhRelayout() {
+  if (state.viewMode !== "dh") return;
+  if (dhTeam.id) {   // 团队模式：按团队快照重排，绝不用流程 run 覆盖
+    if (dhTeam.snap) dhTeamStage(dhTeam.snap);
+    return;
+  }
+  if (!dh.run) return;
+  dhBuildStage(dh.run);
+  dhSyncStates(dh.run);
+  dhRenderBanner(dh.run);
+}
+
+/* ---- 状态与气泡 ---- */
+function dhAvatar(nodeId) { return dh.els.get(nodeId); }
+
+function dhSetState(nodeId, status) {
+  const avatar = dhAvatar(nodeId);
+  if (!avatar) return;
+  avatar.wrap.classList.remove(...DH_STATE_CLASS);
+  avatar.wrap.classList.add(DH_STATE_CLASS.includes(`is-${status}`)
+    ? `is-${status}` : "is-idle");
+}
+
+function dhBubble(nodeId, text, sticky = false) {
+  const avatar = dhAvatar(nodeId);
+  if (!avatar || !text) return;
+  clearTimeout(avatar.hideTimer);
+  avatar.bubble.textContent = text.length > 90 ? `${text.slice(0, 90)}…` : text;
+  avatar.bubble.hidden = false;
+  if (!sticky) avatar.hideTimer = setTimeout(() => { avatar.bubble.hidden = true; }, 6000);
+}
+
+function dhResetStates(initial = "is-waiting") {
+  for (const avatar of dh.els.values()) {
+    avatar.wrap.classList.remove(...DH_STATE_CLASS);
+    avatar.wrap.classList.add(initial);
+    avatar.bubble.hidden = true;
+  }
+}
+
+function dhPulse(nodeId) {
+  const avatar = dhAvatar(nodeId);
+  if (!avatar) return;
+  avatar.wrap.classList.remove("dh-pulse");
+  void avatar.wrap.offsetWidth;
+  avatar.wrap.classList.add("dh-pulse");
+}
+
+function dhFocusNode(nodeId) {
+  dhPulse(nodeId);
+  $$("#dh-feed .dh-msg").forEach(card => {
+    card.classList.toggle("dh-msg-hit", card.dataset.node === nodeId);
+  });
+}
+
+/* ---- 送信：送信人从自己工位走到对方工位，送达后走回 ---- */
+const dhWalks = { chain: Promise.resolve() };
+
+function dhWalkSource(targetId) {
+  if (!dh.graph) return null;
+  const preds = [...new Set((dh.graph.edges || [])
+    .filter(e => e.to === targetId).map(e => e.from))].filter(id => dh.els.has(id));
+  if (!preds.length) return null;
+  const status = new Map((dh.run?.node_runs || []).map(n => [n.node_id, n.status]));
+  return preds.find(id => status.get(id) === "success" && id !== targetId) || null;
+}
+
+async function dhWalkOnce(fromId, toId, note = "") {
+  if (dhReducedMotion() || document.hidden || fromId === toId) return dhPulse(toId);
+  const grab = () => ({
+    src: dhAvatar(fromId), dst: dhAvatar(toId),
+    person: dhAvatar(fromId)?.wrap.querySelector(".dh-person"),
+  });
+  const cleanup = () => {   // 中途退出也要卸下行走态，避免卡在半路
+    const g = grab();
+    if (g.person) g.person.style.transform = "";
+    dhAvatar(fromId)?.wrap.classList.remove("is-walking");
+    if (note) { const a = dhAvatar(fromId); if (a) a.bubble.hidden = true; }
+  };
+  let { src, dst, person } = grab();
+  if (!src || !dst || !person) return dhPulse(toId);
+  const dx = dst.wrap.offsetLeft - src.wrap.offsetLeft;
+  const dy = dst.wrap.offsetTop - src.wrap.offsetTop;
+  const dur = Math.min(1500, 450 + Math.hypot(dx, dy) * 1.3);
+  src.wrap.classList.add("is-walking");
+  if (note) dhBubble(fromId, note, true);   // 送信人头顶带着要送的话
+  person.style.transitionDuration = `${dur}ms`;
+  person.style.transform = `translate(${dx}px, ${dy}px)`;
+  await dhSleep(dur + 60);
+  ({ src, person } = grab());
+  if (!src || !person || state.viewMode !== "dh") { cleanup(); return; }
+  dhPulse(toId);
+  dhBubble(toId, `收到来自 ${src.wrap.dataset.label || fromId} 的交付`);
+  await dhSleep(520);
+  ({ src, person } = grab());
+  if (!src || !person || state.viewMode !== "dh") { cleanup(); return; }
+  person.style.transitionDuration = `${dur}ms`;
+  person.style.transform = "";
+  await dhSleep(dur + 60);
+  dhAvatar(fromId)?.wrap.classList.remove("is-walking");
+  if (note) { const a = dhAvatar(fromId); if (a) a.bubble.hidden = true; }
+}
+
+function dhWalkDeliver(fromId, toId, note = "") {
+  dhWalks.chain = dhWalks.chain
+    .then(() => dhWalkOnce(fromId, toId, note))
+    .catch(() => {});
+}
+
+/* ---- 消息透传流 ---- */
+const DH_KIND = { "node.started": "开始", "node.log": "日志",
+  "node.finished": "完成", "run.queued": "流程",
+  "run.started": "流程", "run.finished": "流程" };
+
+function dhFeedAdd(event) {
+  const feed = $("#dh-feed");
+  if (feed.querySelector(".dh-empty")) feed.replaceChildren();
+  const card = document.createElement("div");
+  card.className = "dh-msg";
+  card.dataset.node = event.node_id || "";
+  card.dataset.level = String(event.level || "info").toLowerCase();
+  const time = new Date(event.timestamp || "");
+  card.innerHTML = `<div class="dh-msg-meta">
+      <time>${esc(Number.isNaN(time.valueOf()) ? "" : time.toLocaleTimeString())}</time>
+      <b>${esc(event.node_label || event.node_id || "流程")}</b>
+      <span class="dh-msg-kind">${esc(DH_KIND[event.type] || event.type || "")}</span>
+    </div><pre>${esc(event.message || "")}</pre>
+    ${tracebackHtml(event.traceback)}`;
+  card.addEventListener("click", () => {
+    if (card.dataset.node) dhFocusNode(card.dataset.node);
+  });
+  const near = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  feed.append(card);
+  while (feed.children.length > 400) feed.firstElementChild.remove();
+  dh.feed.count += 1;
+  $("#dh-feed-count").textContent = String(dh.feed.count);
+  if (near) feed.scrollTop = feed.scrollHeight;
+}
+
+/* ---- 事件 → 表演（record=false 供回放复演，不重复入档） ---- */
+function dhApplyEvents(events, { record = true } = {}) {
+  for (const event of events) {
+    if (record) dh.events.push(event);
+    dhFeedAdd(event);
+    if (event.type === "run.started") dhResetStates("is-waiting");
+    else if (event.type === "node.started") {
+      if (event.node_id) {
+        dhSetState(event.node_id, "running");
+        dhBubble(event.node_id, event.message, true);
+        const source = dhWalkSource(event.node_id);
+        if (source) dhWalkDeliver(source, event.node_id);
+      }
+    } else if (event.type === "node.log") {
+      if (event.node_id && dhAvatar(event.node_id)?.wrap.classList.contains("is-running"))
+        dhBubble(event.node_id, event.message, true);
+    } else if (event.type === "node.finished") {
+      if (!event.node_id) continue;
+      dhBubble(event.node_id, event.message);
+    } else if (event.type === "run.finished") {
+      for (const avatar of dh.els.values()) avatar.bubble.hidden = true;
+    }
+  }
+}
+
+function dhSyncStates(run) {
+  for (const nodeRun of run?.node_runs || []) {
+    if (!dh.els.has(nodeRun.node_id)) continue;
+    dhSetState(nodeRun.node_id, nodeRun.status === "pending" ? "waiting" : nodeRun.status);
+  }
+}
+
+function dhRenderBanner(run) {
+  const banner = $("#dh-banner");
+  if (!run) { banner.classList.add("view-hidden"); return; }
+  const status = RUN_STATUS[run.status] || run.status;
+  banner.textContent = `${run.flow_name || run.flow_id} · ${status}`
+    + (run.error ? ` · ${run.error}` : "");
+  banner.dataset.status = terminalRun(run) ? run.status : "running";
+  banner.classList.remove("view-hidden");
+}
+
+/* ---- 运行事件轮询（与画布监控同一契约：游标 + has_more + 退避） ---- */
+function dhStopPoll() {
+  clearTimeout(dh.mon.timer);
+  dh.mon.controller?.abort();
+  dh.mon.controller = null;
+}
+
+async function dhDrainEvents(generation) {
+  // 一次性读完全部既有事件（加载终态运行 / 回放前装料）
+  for (let guard = 0; guard < 20; guard++) {
+    if (dhStale(generation)) return null;
+    const data = await api(`/api/runs/${encodeURIComponent(dh.runId)}/events`
+      + `?after=${dh.mon.seq}&limit=500`);
+    dhApplyEvents(data.events || []);
+    dh.mon.seq = Math.max(dh.mon.seq, data.next_seq || 0);
+    if (!data.has_more) { dh.run = data.run; return data.run; }
+  }
+  return dh.run;
+}
+
+async function dhPoll(generation) {
+  if (dhStale(generation)) return;
+  dh.mon.controller = new AbortController();
+  let delay = 500;
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(dh.runId)}/events`
+        + `?after=${dh.mon.seq}&limit=200`,
+      { signal: dh.mon.controller.signal });
+    if (dhStale(generation)) return;
+    dh.mon.retries = 0;
+    dh.run = data.run;
+    // 列表项不带图快照；首个事件页返回完整 run 后重建舞台（含边与工位图）。
+    if (!dh.graph && !dhTeam.id && data.run?.graph?.nodes?.length)
+      dhBuildStage(data.run);
+    dhApplyEvents(data.events || []);
+    dh.mon.seq = Math.max(dh.mon.seq, data.next_seq || 0);
+    dhSyncStates(data.run);
+    dhRenderBanner(data.run);
+    // 结束状态可能先于分页事件到达，必须排空后再停。
+    if (terminalRun(data.run) && !data.has_more) {
+      dhStopPoll();
+      $("#dh-live").textContent = "运行已结束，可回放。";
+      if (dh.events.length > 1) $("#dh-banner").dataset.replay = "1";
+      dhScan();
+      return;
+    }
+    if (data.has_more) delay = 0;
+    $("#dh-live").textContent = "● 实时";
+  } catch (error) {
+    if (dhStale(generation) || error.name === "AbortError") return;
+    if ([401, 403, 404].includes(error.status)) {
+      dhStopPoll();
+      $("#dh-live").textContent = `无法继续跟踪：${error.message}`;
+      return;
+    }
+    dh.mon.retries++;
+    delay = Math.min(10000, 500 * 2 ** Math.min(dh.mon.retries, 5));
+    $("#dh-live").textContent = `连接中断，${delay / 1000}s 后重连`;
+  }
+  if (!dhStale(generation))
+    dh.mon.timer = setTimeout(() => dhPoll(generation), delay);
+}
+
+async function dhAttach(run, { replay = false } = {}) {
+  if (dh.playing) return;
+  clearInterval(dhTeam.timer);   // 切回流程视图：停掉团队轮询
+  dhTeam.id = "";
+  dh.mon.generation++;
+  dhStopPoll();
+  dh.mon.seq = 0; dh.mon.retries = 0; dh.events = []; dh.feed.count = 0;
+  $("#dh-feed").replaceChildren();
+  $("#dh-feed-count").textContent = "0";
+  $("#dh-banner").removeAttribute("data-replay");
+  dh.runId = run.run_id; dh.run = run;
+  dhBuildStage(run);
+  dhRenderBanner(run);
+  dhResetStates("is-waiting");
+  dhSyncStates(run);
+  if (terminalRun(run)) {
+    await dhDrainEvents(dh.mon.generation);
+    if (dhStale(dh.mon.generation) || dhTeam.id) return;
+    // 列表项无图快照与名册，事件排空后拿完整 run 重建舞台。
+    dhBuildStage(dh.run);
+    dhResetStates("is-waiting");
+    dhSyncStates(dh.run);
+    $("#dh-live").textContent = "已加载历史运行。";
+    if (dh.events.length > 1) $("#dh-banner").dataset.replay = "1";
+  } else {
+    $("#dh-live").textContent = "● 实时";
+    dhPoll(dh.mon.generation);
+  }
+  if (replay) dhReplay();
+}
+
+/* ---- 回放：按真实相对节奏重演既有事件 ---- */
+const dhSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function dhReplay() {
+  if (dh.playing || dh.events.length < 2) return;
+  dh.playing = true;
+  $("#dh-banner").removeAttribute("data-replay");
+  dhResetStates("is-waiting");
+  $("#dh-feed").replaceChildren();
+  dh.feed.count = 0;
+  $("#dh-feed-count").textContent = "0";
+  $("#dh-live").textContent = "⟲ 回放中";
+  const timeline = [...dh.events];   // 快照：复演不再入档，避免边遍历边增长
+  let previous = null;
+  for (const event of timeline) {
+    const at = Date.parse(event.timestamp || "");
+    const gap = Number.isNaN(at) || previous === null ? 260
+      : Math.min(1200, Math.max(50, at - previous));
+    if (!Number.isNaN(at)) previous = at;
+    await dhSleep(gap);
+    if (state.viewMode !== "dh") { dh.playing = false; return; }
+    dhApplyEvents([event], { record: false });
+  }
+  dh.playing = false;
+  dhSyncStates(dh.run);
+  dhRenderBanner(dh.run);
+  $("#dh-live").textContent = "回放结束。";
+}
+
+/* ---- 运行记录 / 流程选择 ---- */
+function dhRenderRuns(runs) {
+  const box = $("#dh-runs");
+  box.innerHTML = runs.map(run => `
+    <button class="dh-run-item${run.run_id === dh.runId ? " on" : ""}" data-run="${esc(run.run_id)}">
+      <span class="dh-chip" data-status="${esc(run.status)}">${esc(RUN_STATUS[run.status] || run.status)}</span>
+      <b>${esc(run.flow_name || run.flow_id)}</b>
+      <time>${esc(String(run.created_at || "").replace("T", " ").slice(5, 16))}</time>
+    </button>`).join("") || '<div class="dh-empty">还没有运行记录。</div>';
+  $$("#dh-runs .dh-run-item").forEach(item => {
+    item.onclick = () => {
+      const run = runs.find(candidate => candidate.run_id === item.dataset.run);
+      if (run) dhAttach(run);
+    };
+  });
+}
+
+async function dhScan() {
+  if (state.viewMode !== "dh") return;
+  let runs = [];
+  try { runs = await api("/api/runs?limit=12"); }
+  catch { return; }
+  if (state.viewMode !== "dh") return;
+  dhRenderRuns(runs);
+  if (dh.playing || dhTeam.id) return;   // 团队模式下不自动抢舞台
+  const live = runs.find(run => run.status === "running" || run.status === "queued");
+  if (live && live.run_id !== dh.runId) return dhAttach(live);
+  if (!dh.runId && runs.length) return dhAttach(runs[0]);
+}
+
+async function dhRenderFlowSelect() {
+  if (!state.flows.length) await loadFlowList().catch(() => {});
+  const flows = state.flows || [];
+  if (!flows.find(flow => flow.id === dh.flowId)) dh.flowId = flows[0]?.id || "";
+  $("#dh-flow-select").innerHTML = flows.map(flow =>
+    `<option value="${esc(flow.id)}"${flow.id === dh.flowId ? " selected" : ""}>
+      ${esc(flow.name || flow.id)}</option>`).join("")
+    || '<option value="">（暂无流程）</option>';
+}
+
+async function dhRunFlow() {
+  const flowId = $("#dh-flow-select").value;
+  if (!flowId) return toast("没有可运行的流程", "err");
+  let flow;
+  try { flow = await api(`/api/flows/${encodeURIComponent(flowId)}`); }
+  catch (error) { return showApiError(error, "读取流程失败"); }
+  const values = await promptInputs(flow);
+  if (values === null) return;
+  try {
+    const run = await api(`/api/flows/${encodeURIComponent(flowId)}/run`,
+      { method: "POST", body: { inputs: values, background: true } });
+    dhAttach(run);
+    toast("已开跑，舞台就位 🎬", "ok");
+  } catch (error) { showApiError(error, "启动运行失败"); }
+}
+
+function dhEnter() {
+  dh.mon.generation++;
+  $$("#dh-layouts button").forEach(b =>
+    b.classList.toggle("on", b.dataset.layout === dh.layoutMode));
+  dhRenderFlowSelect();
+  dhScan();
+  dhTeamRenderTeams();
+  dh.scanTimer = setInterval(() => dhScan(), 4000);
+}
+
+function dhLeave() {
+  dh.mon.generation++;
+  dhStopPoll();
+  clearInterval(dh.scanTimer);
+  dh.scanTimer = null;
+  clearInterval(dhTeam.timer);
+  dhTeam.timer = null;
+}
+
+$("#dh-run").onclick = dhRunFlow;
+$("#dh-refresh").onclick = () => { dhRenderFlowSelect(); dhScan(); };
+$$("#dh-layouts button").forEach(btn => btn.onclick = () => {
+  dh.layoutMode = btn.dataset.layout;
+  try { localStorage.setItem("dh-layout", dh.layoutMode); } catch { /* 忽略 */ }
+  $$("#dh-layouts button").forEach(b => b.classList.toggle("on", b === btn));
+  dhRelayout();
+});
+$("#dh-flow-select").addEventListener("change", e => {
+  dh.flowId = e.target.value;
+  try { localStorage.setItem("dh-flow", dh.flowId); } catch { /* 忽略 */ }
+});
+$("#dh-banner").addEventListener("click", () => {
+  if ($("#dh-banner").dataset.replay) dhReplay();
+});
+new ResizeObserver(() => {
+  if (state.viewMode !== "dh" || !dh.run || dh.playing) return;
+  clearTimeout(dh._refit);
+  dh._refit = setTimeout(() => dhRelayout(), 150);
+}).observe($("#dh-stage"));
+
+/* ================= 团队模式：项目经理派活 · 多智能体联动 =================
+ * 复用数字员工编制层（workforce/board/bus/crew）：任务 → 编制岗位 → 轮次协作；
+ * 舞台上老板+各岗位员工都是数字人，总线新消息触发真人式走动送信。 */
+const dhTeam = { id: "", snap: null, timer: null, lastSeq: 0, lastMoveSeq: 0, teams: [] };
+
+function dhTeamMapped(id) {   // 总线 actor → 舞台节点（human 即老板）
+  if (!id || id === "*") return "";
+  return id === "human" ? "boss" : id;
+}
+
+function dhTeamStage(snap) {
+  dh.roleMeta = { boss: { name: "老板", color: "#fdb022", icon: "👑" } };
+  for (const emp of snap.employees || []) {
+    dh.roleMeta[emp.role] = { name: emp.role_meta?.name || emp.role,
+      color: emp.role_meta?.color || "#8b98f8", icon: emp.role_meta?.icon || "•" };
+  }
+  const nodes = [{ id: "boss", type: "boss", label: "老板" },
+    ...(snap.employees || []).map(emp => ({ id: emp.id, type: emp.role,
+      label: emp.name || emp.role })) ];
+  const seen = new Set();
+  const edges = [];
+  for (const pair of snap.edges || []) {
+    const from = dhTeamMapped(pair.from), to = dhTeamMapped(pair.to);
+    if (!from || !to || from === to) continue;
+    const key = `${from}->${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({ from, to });
+  }
+  dhTeam.snap = snap;
+  dhBuildStage({ graph: { nodes, edges }, node_runs: [] });
+  dhTeamSync(snap, { reset: true });
+}
+
+function dhTeamStatusClass(status) {
+  return { working: "is-running", done: "is-success",
+    blocked: "is-failed" }[status] || "is-idle";
+}
+
+function dhTeamSync(snap, { reset = false } = {}) {
+  for (const emp of snap.employees || []) {
+    const avatar = dhAvatar(emp.id);
+    if (!avatar) continue;
+    avatar.wrap.classList.remove(...DH_STATE_CLASS);
+    avatar.wrap.classList.add(reset ? "is-idle" : dhTeamStatusClass(emp.status));
+    avatar.bubble.hidden = true;
+  }
+  const boss = dhAvatar("boss");
+  if (boss) { boss.wrap.classList.remove(...DH_STATE_CLASS); boss.wrap.classList.add("is-idle"); }
+  dhRenderBannerTeam(snap);
+}
+
+function dhRenderBannerTeam(snap) {
+  const banner = $("#dh-banner");
+  const team = snap.team || {};
+  const status = { running: "协作中", paused: "已暂停", waiting_human: "等老板指示",
+    done: "已交付 ✅", failed: "失败", stopped: "已停止", draft: "待启动" }[team.status]
+    || team.status;
+  const progress = snap.progress || {};
+  const done = progress.by_status?.done || 0;
+  banner.textContent = `【团队】${team.task || ""} · ${status} · 第 ${team.round_no || 0} 轮`
+    + ` · 卡片 ${done}/${progress.total || 0}`
+    + (status === "等老板指示" ? "（右下角发消息即恢复）" : "");
+  banner.dataset.status = team.status === "done" ? "success"
+    : ["failed", "stopped"].includes(team.status) ? "failed" : "running";
+  banner.classList.remove("view-hidden");
+}
+
+function dhTeamActorLabel(actor) {
+  if (actor === "human") return "老板";
+  if (actor === "crew") return "协调器";
+  const emp = (dhTeam.snap?.employees || []).find(e => e.id === actor);
+  return emp?.name || actor;
+}
+
+function dhTeamFeedMessages(messages, { reset = false } = {}) {
+  let latest = reset ? 0 : dhTeam.lastSeq;
+  const fresh = [];
+  for (const msg of messages || []) {
+    if (Number(msg.seq) > latest) latest = Number(msg.seq);
+    if (reset || Number(msg.seq) > dhTeam.lastSeq) fresh.push(msg);
+  }
+  dhTeam.lastSeq = latest;
+  if (reset) {
+    $("#dh-feed").replaceChildren();
+    dh.feed.count = 0;
+    $("#dh-feed-count").textContent = "0";
+  }
+  for (const msg of fresh) {
+    dhFeedAdd({ timestamp: msg.created_at,
+      node_id: dhTeamMapped(msg.from_actor) || "",
+      node_label: dhTeamActorLabel(msg.from_actor),
+      type: msg.kind, level: msg.kind === "human" ? "warning" : "info",
+      message: `${msg.subject}${msg.body?.text ? `：${msg.body.text}` : ""}` });
+  }
+  return fresh;
+}
+
+function dhTeamWalk(fresh) {
+  // 完工通知（deliver/review）优先走，派活其次，广播垫底；一条消息一次走动，带话上门
+  const KIND_RANK = { deliver: 0, review: 1, human: 2, assign: 3, response: 4 };
+  const directed = fresh.filter(m => m.to_actor && m.to_actor !== "*")
+    .sort((a, b) => (KIND_RANK[a.kind] ?? 5) - (KIND_RANK[b.kind] ?? 5));
+  const broadcast = fresh.filter(m => !m.to_actor || m.to_actor === "*")
+    .sort((a, b) => (KIND_RANK[a.kind] ?? 5) - (KIND_RANK[b.kind] ?? 5));
+  let budget = 6;
+  const queued = new Set();
+  for (const msg of [...directed, ...broadcast]) {
+    if (budget <= 0) break;
+    const from = dhTeamMapped(msg.from_actor);
+    const to = dhTeamMapped(msg.to_actor);
+    const note = msg.subject || "";
+    if (!from || !dh.els.has(from)) continue;
+    if (!to || to === "*") {   // 广播：送到在场的第一个员工
+      let first = "";
+      for (const key of dh.els.keys()) {
+        if (key !== "boss" && key !== from) { first = key; break; }
+      }
+      if (first && !queued.has(`${from}->${first}`)) {
+        queued.add(`${from}->${first}`);
+        dhWalkDeliver(from, first, note);
+        budget--;
+      }
+      continue;
+    }
+    if (dh.els.has(to) && from !== to && !queued.has(`${from}->${to}`)) {
+      queued.add(`${from}->${to}`);
+      dhWalkDeliver(from, to, note);
+      budget--;
+    }
+  }
+  return queued;
+}
+
+const DH_CHAIN = ["product", "architect", "developer", "qa", "ops", "sales"];
+
+function dhTeamMoveWalks(snap, queued) {
+  // 看板卡片完工（→done）时，完工者本人走到下游岗位的工位通知接班
+  for (const mv of snap.moves || []) {
+    if (Number(mv.seq) <= dhTeam.lastMoveSeq) continue;
+    dhTeam.lastMoveSeq = Math.max(dhTeam.lastMoveSeq, Number(mv.seq));
+    if (mv.to_status !== "done" || mv.from_status === "done") continue;
+    const actor = dhTeamMapped(mv.actor);
+    if (!actor || !dh.els.has(actor)) continue;
+    const emp = (snap.employees || []).find(e => e.id === actor);
+    const idx = DH_CHAIN.indexOf(emp?.role || "");
+    for (let i = idx + 1; i < DH_CHAIN.length; i++) {
+      const next = (snap.employees || []).find(e => e.role === DH_CHAIN[i]
+        && dh.els.has(e.id));
+      if (next) {
+        if (!queued.has(`${actor}->${next.id}`))
+          dhWalkDeliver(actor, next.id, `${emp?.name || "完工"}：该你了`);
+        break;
+      }
+    }
+  }
+}
+
+async function dhTeamPollOnce() {
+  if (!dhTeam.id || state.viewMode !== "dh") return;
+  let snap;
+  try { snap = await api(`/api/workforce/teams/${encodeURIComponent(dhTeam.id)}/snapshot`); }
+  catch { return; }
+  if (dhTeam.id !== snap.team?.id || state.viewMode !== "dh") return;
+  dhTeam.snap = snap;
+  // draft 团队启动后才 provision 员工：名单变了就重排舞台（不只看 els 是否为空）
+  const want = new Set(["boss", ...(snap.employees || []).map(e => e.id)]);
+  const stageOk = dh.els.size === want.size && [...want].every(id => dh.els.has(id));
+  if (!stageOk) dhTeamStage(snap);
+  const fresh = dhTeamFeedMessages(snap.messages);
+  const queued = dhTeamWalk(fresh);
+  dhTeamMoveWalks(snap, queued);
+  dhTeamSync(snap);
+  dhTeamRenderTeams(snap.teams || dhTeam.teams);
+}
+
+async function dhTeamRenderTeams(teams) {
+  if (!teams) {
+    try { teams = await api("/api/workforce/teams"); }
+    catch { return; }
+  }
+  dhTeam.teams = teams || [];
+  const box = $("#dh-teams");
+  box.innerHTML = dhTeam.teams.map(team => `
+    <button class="dh-run-item${team.id === dhTeam.id ? " on" : ""}" data-team="${esc(team.id)}">
+      <span class="dh-chip" data-status="${esc(team.status)}">${esc(team.status)}</span>
+      <b>${esc(String(team.task || "").slice(0, 24) || team.id)}</b>
+      <time>第 ${team.round_no || 0} 轮 · ${team.employee_count || 0} 人</time>
+    </button>`).join("") || '<div class="dh-empty">还没有团队，先「编制团队」。</div>';
+  $$("#dh-teams .dh-run-item").forEach(item => {
+    item.onclick = async () => {
+      try {
+        dhTeamAttach(await api(`/api/workforce/teams/${item.dataset.team}/snapshot`));
+      } catch (error) { showApiError(error, "打开团队失败"); }
+    };
+  });
+}
+
+function dhTeamAttach(snap) {
+  dhTeam.id = snap.team?.id || "";
+  dh.mon.generation++;   // 作废在途的流程运行轮询/排水，防止其重建舞台
+  dhStopPoll();
+  clearInterval(dhTeam.timer);
+  dhTeamFeedMessages(snap.messages, { reset: true });
+  dhTeam.lastMoveSeq = 0;
+  dhTeamStage(snap);
+  dhTeamRenderTeams(dhTeam.teams);
+  if (dhTeam.id)
+    dhTeam.timer = setInterval(dhTeamPollOnce, 2500);
+  dhTeamPollOnce();
+}
+
+async function dhTeamCompose() {
+  const task = $("#dh-team-task").value.trim();
+  if (!task) return toast("先写下要交给团队的任务", "err");
+  try {
+    const snap = await api("/api/workforce/teams",
+      { method: "POST", body: { task, start: false } });
+    $("#dh-team-task").value = "";
+    dhTeamAttach(snap);
+    await dhTeamRenderTeams();
+    toast("编制完成：项目经理已排好岗位与里程碑，点「▶ 启动」开跑", "ok");
+  } catch (error) { showApiError(error, "编制失败"); }
+}
+
+async function dhTeamAction(action) {
+  if (!dhTeam.id) return toast("先编制或选择一个团队", "err");
+  try {
+    if (action === "start")
+      await api(`/api/workforce/teams/${dhTeam.id}/start`,
+        { method: "POST", body: {} });
+    else
+      await api(`/api/workforce/teams/${dhTeam.id}/${action}`, { method: "POST" });
+    dhTeamPollOnce();
+  } catch (error) { showApiError(error, "操作失败"); }
+}
+
+async function dhTeamSay() {
+  const input = $("#dh-feed-input");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!dhTeam.id) return toast("先编制或选择一个团队", "err");
+  input.value = "";
+  try {
+    await api(`/api/workforce/teams/${dhTeam.id}/message`,
+      { method: "POST", body: { to: "*", text } });
+    dhTeamPollOnce();
+  } catch (error) { showApiError(error, "发送失败"); }
+}
+
+$("#dh-team-compose").onclick = dhTeamCompose;
+$("#dh-team-start").onclick = () => dhTeamAction("start");
+$("#dh-team-pause").onclick = () => dhTeamAction("pause");
+$("#dh-team-resume").onclick = () => dhTeamAction("resume");
+$("#dh-team-stop").onclick = () => dhTeamAction("stop");
+$("#dh-feed-send").onclick = dhTeamSay;
+$("#dh-feed-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") dhTeamSay();
+});
+
 /* ================= 视图切换：智能体为核，画布为编排工具 ================= */
 function switchView(mode) {
   if (mode === "flows") mode = state.graph ? "flows-editor" : "flows-list";
+  const previous = state.viewMode;
   state.viewMode = mode;
   const inFlows = mode === "flows-list" || mode === "flows-editor";
   $("#nav-agents").classList.toggle("on", mode === "agents");
   $("#nav-flows").classList.toggle("on", inFlows);
+  $("#nav-dh").classList.toggle("on", mode === "dh");
   $("#agents-view").classList.toggle("view-hidden", mode !== "agents");
   $("#flows-view").classList.toggle("view-hidden", mode !== "flows-list");
+  $("#dh-view").classList.toggle("view-hidden", mode !== "dh");
   $("#topbar").classList.toggle("view-hidden", mode !== "flows-editor");
   $("#main").classList.toggle("view-hidden", mode !== "flows-editor");
+  if (previous === "dh" && mode !== "dh") dhLeave();
   if (mode === "agents") renderAgentsHome();
   else if (mode === "flows-list") renderFlowsHome();
+  else if (mode === "dh") dhEnter();
   else requestAnimationFrame(() => {   // 画布从隐藏变为可见后重新适配视口
     updateVisibility(); fitView(); drawMinimap();
   });
 }
 $("#nav-agents").onclick = () => switchView("agents");
+$("#nav-dh").onclick = () => switchView("dh");
 function returnToFlowList() {
   if (state.viewMode === "flows-editor" && state.dirty
       && !confirm("当前流程有未保存修改，确认返回工作流列表？")) return;

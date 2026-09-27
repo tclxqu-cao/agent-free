@@ -14,7 +14,10 @@ from pathlib import Path
 
 from .agentrt import DEFAULT_AGENTS, AgentRuntime, AgentStore
 from .assets import AssetStore
+from .board import KanbanBoard
 from .builtin_flows import builtin_flows
+from .bus import Hub, MessageBus
+from .crew import CrewDriver
 from .engine import FlowRunner, RunResult
 from .external_agent import ExternalAgentCredentialStore
 from .evals import DEFAULT_EVAL_SUITE, EvalStore, TargetRunner
@@ -29,6 +32,7 @@ from .skills import DEFAULT_SKILLS, SkillStore
 from .store import FlowStore, RunStore
 from .tools import ToolRegistry, register_builtin_tools
 from .video import VideoModels
+from .workforce import WorkforceStore
 
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="flow-run")
@@ -44,7 +48,7 @@ class WorkspaceRuntime:
     """All mutable resources and execution services for one Workspace."""
 
     def __init__(self, workspace_id: str, root: Path, config: dict,
-                 registry: AgentRegistry, observer):
+                 registry: AgentRegistry, observer, governance=None):
         self.workspace_id = workspace_id
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -85,6 +89,13 @@ class WorkspaceRuntime:
         # A non-empty workspace is user-owned. Re-seeding missing built-ins on
         # every restart would resurrect flows the user deliberately deleted.
         self.flows.seed_if_empty(builtin_flows())
+        workforce_dir = self.root / "workforce"
+        self.hub = Hub()
+        self.bus = MessageBus(workforce_dir / "bus.sqlite", hub=self.hub)
+        self.board = KanbanBoard(workforce_dir / "board.sqlite", hub=self.hub)
+        self.teams = WorkforceStore(workforce_dir / "workforce.sqlite")
+        self.crew = CrewDriver(teams=self.teams, board=self.board, bus=self.bus,
+                               runtime=self, governance=governance)
 
     def runner(self) -> FlowRunner:
         return FlowRunner(
@@ -93,6 +104,10 @@ class WorkspaceRuntime:
             mcp=self.mcp, tools=self.tools, ai_agents=self.ai_agents,
             agent_rt=self.agent_rt, obs=self.obs,
             subflow_invoker=self._invoke_flow)
+
+    def invoke_flow(self, flow_id: str, inputs: dict) -> dict:
+        """团队驱动器等带外执行入口使用的公开封装。"""
+        return self._invoke_flow(flow_id, inputs)
 
     def _invoke_flow(self, flow_id: str, inputs: dict, event_sink=None) -> dict:
         stack = list(getattr(self._flow_call_state, "stack", []))
@@ -210,7 +225,7 @@ class WorkspaceManager:
     def _build(self, workspace_id: str) -> WorkspaceRuntime:
         return WorkspaceRuntime(
             workspace_id, self.workspaces_root / workspace_id, self.config,
-            self.registry, self.observer)
+            self.registry, self.observer, governance=self.governance)
 
     def get(self, workspace_id: str) -> WorkspaceRuntime:
         with self._lock:
@@ -219,6 +234,7 @@ class WorkspaceManager:
                 runtime = self._build(workspace_id)
                 self._cache[workspace_id] = runtime
                 self._register_materialized(workspace_id, runtime)
+                runtime.crew.degrade_interrupted(workspace_id)
             return runtime
 
     def invalidate(self, workspace_id: str) -> None:
