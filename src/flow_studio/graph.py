@@ -103,7 +103,7 @@ NODE_TYPES: dict[str, dict] = {
         "form": [{"key": "message", "widget": "textarea", "label": "发给智能体的话（模板）",
                   "default": "{{input.message}}", "rows": 6},
                  {"key": "context", "widget": "json", "label": "结构化上下文（可用模板）",
-                  "default": "{}"},
+                  "default": {}},
                  {"key": "session_id", "widget": "text", "label": "会话 ID（留空=每次新会话）",
                   "default": ""},
                  {"key": "required", "widget": "bool", "label": "失败时中断流程",

@@ -302,6 +302,39 @@ def test_restart_marks_only_unfinished_runs_interrupted(tmp_path):
     assert len(runtime.runs.events("running")["events"]) == first_count
 
 
+def test_dynamic_agent_events_and_snapshot_survive_refresh(tmp_path):
+    store = RunStore(tmp_path / "dynamic" / "runs.sqlite")
+    run = RunResult(run_id="dynamic-1", flow_id="flow", flow_name="Flow",
+                    status="running").to_dict()
+    run["graph"] = {"nodes": [{"id": "ca", "type": "ai_agent"}], "edges": []}
+    run["node_runs"] = [{
+        "node_id": "ca", "type": "ai_agent", "label": "CA", "status": "running",
+        "output": {"dynamicTeamSnapshot": {
+            "supervisorSessionId": "parent",
+            "agents": [{"agentId": "worker-1", "sessionId": "child-1",
+                        "name": "研究员", "status": "running"}],
+        }},
+    }]
+    store.record(run, {"type": "agent.spawned", "node_id": "ca",
+                       "agentId": "worker-1", "sessionId": "child-1",
+                       "name": "研究员", "message": "分析任务"})
+    run["status"] = "success"
+    run["node_runs"][0]["status"] = "success"
+    run["node_runs"][0]["output"]["dynamicTeamSnapshot"]["agents"][0].update(
+        status="completed", summary="完成")
+    store.record(run, {"type": "agent.completed", "node_id": "ca",
+                       "agentId": "worker-1", "sessionId": "child-1",
+                       "summary": "完成", "message": "完成"})
+
+    reopened = RunStore(tmp_path / "dynamic" / "runs.sqlite")
+    page = reopened.events("dynamic-1")
+    assert [event["type"] for event in page["events"]] == [
+        "agent.spawned", "agent.completed"]
+    assert page["run"]["node_runs"][0]["output"]["dynamicTeamSnapshot"][
+        "agents"][0]["status"] == "completed"
+    assert [node["id"] for node in page["run"]["graph"]["nodes"]] == ["ca"]
+
+
 @pytest.mark.parametrize("optional", [False, True])
 def test_credentials_are_redacted_in_live_logs_and_stored_traceback(live_app, optional):
     _, client, runtime = live_app

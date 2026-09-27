@@ -22,6 +22,12 @@ class ExternalAgentError(RuntimeError):
         self.remote_stack = remote_stack
 
 
+DYNAMIC_AGENT_EVENTS = {
+    "agent.spawned", "agent.started", "agent.progress",
+    "agent.completed", "agent.failed",
+}
+
+
 class ExternalAgentCredentialStore:
     """Stores provider tokens outside Agent snapshots and never returns them in lists."""
 
@@ -120,6 +126,7 @@ class CustomerAgentProvider(ExternalAgentProvider):
     def run(self, message: str, *, instructions: str = "", agent_id: str = "",
             session_id: str = "",
             context: dict | None = None, selection: dict | None = None,
+            orchestration: dict | None = None,
             on_event: Callable[[str, dict], None] | None = None) -> dict:
         text = str(message or "").strip()
         if not text:
@@ -131,6 +138,8 @@ class CustomerAgentProvider(ExternalAgentProvider):
             body["agentId"] = agent_id
         if session_id:
             body["sessionId"] = session_id
+        if orchestration:
+            body["orchestration"] = orchestration
         with self._client() as client:
             response = client.post(f"{self.base_url}/api/flow/v1/runs", json=body)
             admitted = self._json(response)
@@ -140,21 +149,29 @@ class CustomerAgentProvider(ExternalAgentProvider):
             final_text = ""
             tool_calls = 0
             last_event_id = ""
+            dynamic_agents: dict[str, dict] = {}
+            dynamic_events: list[dict] = []
             with client.stream("GET", events_url, headers={"Accept": "text/event-stream"}) as stream:
                 if stream.status_code >= 400:
                     self._raise_response(stream)
                 for event_id, event_type, data in _iter_sse(stream.iter_lines()):
                     if event_id:
                         last_event_id = event_id
+                    public_data = data
+                    if event_type in DYNAMIC_AGENT_EVENTS:
+                        public_data = _normalize_dynamic_agent_event(event_type, data)
+                        if len(dynamic_events) < 1000:
+                            dynamic_events.append({"type": event_type, **public_data})
+                        _apply_dynamic_agent_event(dynamic_agents, event_type, public_data)
                     if on_event:
-                        on_event(event_type, data)
+                        on_event(event_type, public_data)
                     if event_type == "tool.started":
                         tool_calls += 1
                     elif event_type == "assistant.delta":
                         final_text += str(data.get("text") or "")
                     elif event_type == "run.completed":
                         final_text = str(data.get("text") or final_text)
-                        return {
+                        result = {
                             "text": final_text,
                             "run_id": run_id,
                             "session_id": resolved_session,
@@ -162,6 +179,13 @@ class CustomerAgentProvider(ExternalAgentProvider):
                             "duration_ms": data.get("durationMs"),
                             "last_event_id": last_event_id,
                         }
+                        if orchestration or dynamic_events:
+                            result.update(dynamic_team_events=dynamic_events,
+                                          dynamic_team_snapshot={
+                                "supervisorSessionId": resolved_session,
+                                "agents": list(dynamic_agents.values()),
+                            })
+                        return result
                     elif event_type == "run.failed":
                         raise ExternalAgentError(
                             str(data.get("code") or "RUN_FAILED"),
@@ -263,6 +287,75 @@ def _required_response_string(data: dict, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ExternalAgentError("INVALID_RESPONSE", f"Customer Agent 响应缺少 {key}")
     return value.strip()
+
+
+def _event_string(data: dict, key: str, *, required: bool = False,
+                  limit: int = 12_000) -> str:
+    value = data.get(key)
+    if value is None and not required:
+        return ""
+    if not isinstance(value, str) or (required and not value.strip()):
+        raise ExternalAgentError("INVALID_RESPONSE", f"动态 Agent 事件缺少 {key}")
+    return value.strip()[:limit]
+
+
+def _normalize_dynamic_agent_event(event_type: str, data: dict) -> dict:
+    if event_type not in DYNAMIC_AGENT_EVENTS:
+        return dict(data)
+    out = {
+        "agentId": _event_string(data, "agentId", required=True, limit=200),
+        "sessionId": _event_string(data, "sessionId", required=True, limit=200),
+        "parentSessionId": _event_string(data, "parentSessionId", limit=200),
+        "name": _event_string(data, "name", limit=80),
+    }
+    if event_type == "agent.spawned":
+        out.update(role=_event_string(data, "role", limit=500),
+                   task=_event_string(data, "task", limit=8_000))
+    elif event_type == "agent.started":
+        out["startedAt"] = _event_string(data, "startedAt", limit=100)
+    elif event_type == "agent.progress":
+        out.update(text=_event_string(data, "text", limit=4_000),
+                   phase=_event_string(data, "phase", limit=40),
+                   toolName=_event_string(data, "toolName", limit=200))
+    elif event_type == "agent.completed":
+        out["summary"] = _event_string(data, "summary", limit=12_000)
+        duration = data.get("durationMs")
+        out["durationMs"] = duration if isinstance(duration, (int, float)) else None
+    else:
+        out.update(code=_event_string(data, "code", limit=100) or "AGENT_FAILED",
+                   message=_event_string(data, "message", limit=4_000))
+    return out
+
+
+def _apply_dynamic_agent_event(agents: dict[str, dict], event_type: str,
+                               data: dict) -> None:
+    agent_id = data["agentId"]
+    current = agents.setdefault(agent_id, {
+        "agentId": agent_id,
+        "sessionId": data.get("sessionId", ""),
+        "parentSessionId": data.get("parentSessionId", ""),
+        "name": data.get("name", ""),
+        "role": "",
+        "task": "",
+        "status": "queued",
+    })
+    for key in ("sessionId", "parentSessionId", "name", "role", "task"):
+        if data.get(key):
+            current[key] = data[key]
+    if event_type == "agent.started":
+        current.update(status="running", startedAt=data.get("startedAt", ""))
+    elif event_type == "agent.progress":
+        current.update(status="running", progress=data.get("text", ""),
+                       phase=data.get("phase", ""),
+                       toolName=data.get("toolName", ""))
+    elif event_type == "agent.completed":
+        current.update(status="completed", summary=data.get("summary", ""),
+                       durationMs=data.get("durationMs"))
+    elif event_type == "agent.failed":
+        status = ("cancelled" if data.get("code") in {
+            "PARENT_CANCELLED", "RUN_CANCELLED"} else "failed")
+        current.update(status=status, code=data.get("code", "AGENT_FAILED"),
+                       error=data.get("message", ""))
 
 
 def _iter_sse(lines):

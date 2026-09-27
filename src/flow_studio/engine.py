@@ -177,6 +177,24 @@ class FlowRunner:
             event["traceback"] = redact_log(traceback)
         sink(self._result.to_dict(), event)
 
+    def _emit_external_agent_event(self, event_type: str, data: dict,
+                                   node: NodeRun) -> None:
+        sink = getattr(self, "_event_sink", None)
+        if sink is None:
+            return
+        message = (data.get("text") or data.get("summary") or data.get("message")
+                   or data.get("task") or event_type)
+        event = {"type": event_type,
+                 "level": "error" if event_type == "agent.failed" else "info",
+                 "message": redact_log(str(message)),
+                 "node_id": node.node_id, "node_label": node.label}
+        for key in ("agentId", "sessionId", "parentSessionId", "name", "role",
+                    "task", "status", "phase", "toolName", "durationMs", "code",
+                    "summary"):
+            if key in data:
+                event[key] = data[key]
+        sink(self._result.to_dict(), event)
+
     def _observe(self, result: RunResult) -> None:
         """可观测性上报（Langfuse 等），任何故障不影响流程结果。"""
         if self.obs is None:
@@ -438,9 +456,46 @@ class FlowRunner:
         if not isinstance(context, dict):
             raise ValueError("智能体节点 context 必须是对象")
         run_id = getattr(self, "_result", None) and self._result.run_id
+        nrun = getattr(self, "_active_node_run", None)
+        dynamic_agents = {}
+
+        def on_agent_event(event_type, event):
+            if nrun is None:
+                return
+            agent_id = str(event.get("agentId") or "")
+            if agent_id:
+                current = dynamic_agents.setdefault(agent_id, {
+                    "agentId": agent_id,
+                    "sessionId": event.get("sessionId", ""),
+                    "name": event.get("name", ""),
+                    "role": event.get("role", ""),
+                    "task": event.get("task", ""),
+                    "status": "queued",
+                })
+                for key in ("sessionId", "name", "role", "task", "phase", "toolName"):
+                    if event.get(key):
+                        current[key] = event[key]
+                if event_type in {"agent.started", "agent.progress"}:
+                    current["status"] = "running"
+                elif event_type == "agent.completed":
+                    current.update(status="completed", summary=event.get("summary", ""),
+                                   durationMs=event.get("durationMs"))
+                elif event_type == "agent.failed":
+                    current.update(status=("cancelled" if event.get("code") in {
+                        "PARENT_CANCELLED", "RUN_CANCELLED"} else "failed"),
+                                   code=event.get("code", ""),
+                                   error=event.get("message", ""))
+                if event_type == "agent.progress":
+                    current["progress"] = event.get("text", "")
+                nrun.output = {**(nrun.output or {}), "dynamicTeamSnapshot": {
+                    "supervisorSessionId": event.get("parentSessionId", ""),
+                    "agents": list(dynamic_agents.values()),
+                }}
+            self._emit_external_agent_event(event_type, event, nrun)
+
         out = self.agent_rt.run(agent, message, session_id=session_id or None,
                                 flow_run_id=run_id, skill_id=skill_id or None,
-                                context=context)
+                                context=context, event_sink=on_agent_event)
         if out.get("error"):
             if node.params.get("required"):
                 raise RuntimeError(f"智能体执行失败：{out['error']}")
@@ -449,7 +504,9 @@ class FlowRunner:
                 **({"artifact": out["artifact"]} if isinstance(out.get("artifact"), dict) else {}),
                 "steps": out.get("steps", [])[:20],
                 "tool_calls": out.get("tool_calls", 0),
-                "session_id": out.get("session_id", "")}
+                "session_id": out.get("session_id", ""),
+                **({"dynamicTeamSnapshot": out["dynamic_team_snapshot"]}
+                   if isinstance(out.get("dynamic_team_snapshot"), dict) else {})}
 
     def _run_kb(self, node: Node, ns: dict) -> dict:
         if self.kb is None:

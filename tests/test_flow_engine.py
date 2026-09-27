@@ -228,6 +228,50 @@ def test_agent_optional_degrades():
     assert run.node_run("a").status == "skipped"
 
 
+def test_dynamic_agent_events_are_scoped_and_snapshot_does_not_mutate_graph():
+    class Agents:
+        @staticmethod
+        def get(agent_id):
+            return {"id": agent_id, "name": agent_id, "skill_ids": []}
+
+    class Runtime:
+        @staticmethod
+        def run(agent, _message, **kwargs):
+            child_session = f"child-{agent['id']}"
+            child = {"agentId": "same-child", "sessionId": child_session,
+                     "parentSessionId": f"parent-{agent['id']}", "name": "研究员",
+                     "role": "分析", "task": f"分析 {agent['id']}"}
+            sink = kwargs["event_sink"]
+            sink("agent.spawned", child)
+            sink("agent.started", child)
+            sink("agent.progress", {**child, "text": "处理中", "phase": "assistant"})
+            sink("agent.completed", {**child, "summary": "完成", "durationMs": 15})
+            return {"text": agent["id"], "session_id": f"parent-{agent['id']}",
+                    "tool_calls": 0, "steps": [], "dynamic_team_snapshot": {
+                        "supervisorSessionId": f"parent-{agent['id']}",
+                        "agents": [{**child, "status": "completed", "summary": "完成"}],
+                    }}
+
+    graph = _g([
+        _node("start", "start"),
+        _node("ca1", "ai_agent", ai_agent_id="one", message="work", required=True),
+        _node("ca2", "ai_agent", ai_agent_id="two", message="work", required=True),
+        _node("end", "end", output="{{ca1.text}}/{{ca2.text}}"),
+    ], [{"from": "start", "to": "ca1"}, {"from": "ca1", "to": "ca2"},
+        {"from": "ca2", "to": "end"}])
+    events = []
+    run = FlowRunner(ai_agents=Agents(), agent_rt=Runtime()).run(
+        graph, {}, event_sink=lambda _snapshot, event: events.append(event))
+
+    assert run.status == "success" and run.output == "one/two"
+    agent_events = [event for event in events if event["type"].startswith("agent.")]
+    assert len(agent_events) == 8
+    assert {event["node_id"] for event in agent_events} == {"ca1", "ca2"}
+    assert run.node_run("ca1").output["dynamicTeamSnapshot"]["agents"][0]["sessionId"] == "child-one"
+    assert run.node_run("ca2").output["dynamicTeamSnapshot"]["agents"][0]["sessionId"] == "child-two"
+    assert [node["id"] for node in run.graph["nodes"]] == ["start", "ca1", "ca2", "end"]
+
+
 def test_subflow_exposes_structured_nodes_and_forwards_events():
     seen = {}
 

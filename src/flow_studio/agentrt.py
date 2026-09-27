@@ -20,6 +20,7 @@ import os
 import threading
 import uuid
 from pathlib import Path
+from typing import Callable
 
 from .agent_defaults import load_default_agents
 from .llm import llm_messages_raw
@@ -164,6 +165,7 @@ def normalize_agent(data: dict) -> dict:
             selection.get("mcp_server_ids", mcp_servers))
         memory_enabled = bool(selection.get("memory_enabled", memory_enabled))
         tool_policy_id = str(selection.get("tool_policy_id") or "").strip()
+        dynamic_team = _normalize_dynamic_team(raw_orchestration.get("dynamic_team"))
         orchestration = {
             "mode": "external_agent", "provider": provider,
             "agent_id": str(raw_orchestration.get("agent_id")
@@ -179,6 +181,7 @@ def normalize_agent(data: dict) -> dict:
                           "memory_enabled": memory_enabled,
                           **({"tool_policy_id": tool_policy_id}
                              if tool_policy_id else {})},
+            **({"dynamic_team": dynamic_team} if dynamic_team else {}),
         }
     elif mode == "flow":
         flow_id = str(raw_orchestration.get("flow_id") or flow_id).strip()
@@ -222,6 +225,33 @@ def _string_ids(values) -> list[str]:
         if item not in out:
             out.append(item)
     return out
+
+
+def _normalize_dynamic_team(value) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("dynamic_team 必须是对象")
+    if not value.get("enabled"):
+        return None
+
+    def bounded(name, default, low, high):
+        raw = value.get(name, default)
+        if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+            raise ValueError(f"dynamic_team.{name} 必须是 {low}..{high} 的整数")
+        return raw
+
+    max_workers = bounded("max_workers", 6, 1, 12)
+    max_parallel = bounded("max_parallel", 3, 1, 6)
+    if max_parallel > max_workers:
+        raise ValueError("dynamic_team.max_parallel 不能超过 max_workers")
+    return {
+        "enabled": True,
+        "max_workers": max_workers,
+        "max_parallel": max_parallel,
+        "worker_timeout_seconds": bounded(
+            "worker_timeout_seconds", 900, 30, 3600),
+    }
 
 
 def _external_agent_instructions(agent: dict) -> str:
@@ -450,7 +480,8 @@ class AgentRuntime:
             session_id: str | None = None,
             flow_run_id: str | None = None,
             skill_id: str | None = None,
-            context: dict | None = None) -> dict:
+            context: dict | None = None,
+            event_sink: Callable[[str, dict], None] | None = None) -> dict:
         explicit_session_id = str(session_id or "").strip()
         session_id = explicit_session_id or uuid4_hex()
         log.info("智能体开始：%s，session_id=%s", agent.get("id"), session_id)
@@ -493,15 +524,23 @@ class AgentRuntime:
             known_mcp = {str(m.get("id") or "") for m in catalog.get("mcpServers") or []}
             known_models = {str(m.get("id") or "") for m in catalog.get("models") or []}
             selected_tool_ids = [str(t) for t in (selection.get("tool_ids") or [])
-                                 if str(t) in known_tools]
+                                 if not known_tools or str(t) in known_tools]
             selected_mcp_ids = [str(m) for m in (selection.get("mcp_server_ids") or [])
-                                if str(m) in known_mcp]
+                                if not known_mcp or str(m) in known_mcp]
             skill_ids = [str(s) for s in skill_ids
                          if not known_skills or str(s) in known_skills]
-            selected_model = profile_id if profile_id in known_models else ""
+            selected_model = profile_id if not known_models or profile_id in known_models else ""
+            dynamic_team = orchestration.get("dynamic_team") or None
+            if dynamic_team and not bool(
+                    (catalog.get("features") or {}).get("dynamicAgentOrchestration")):
+                return {"text": "", "steps": [], "session_id": session_id,
+                        "error": "DYNAMIC_ORCHESTRATION_UNSUPPORTED: "
+                                 "Customer Agent 不支持动态多 Agent 编排"}
             steps = []
 
             def observe(event_type, event):
+                if event_type.startswith("agent.") and event_sink is not None:
+                    event_sink(event_type, event)
                 if event_type == "tool.started":
                     name = str(event.get("name") or "unknown")
                     log.info("Customer Agent 工具开始：%s", name)
@@ -542,7 +581,14 @@ class AgentRuntime:
                     **({"toolPolicyId": str(selection["tool_policy_id"])}
                        if str(selection.get("tool_policy_id") or "").strip()
                        else {}),
-                }, on_event=observe)
+                },
+                orchestration=({
+                    "mode": "dynamic_team",
+                    "maxWorkers": dynamic_team["max_workers"],
+                    "maxParallel": dynamic_team["max_parallel"],
+                    "workerTimeoutSeconds": dynamic_team["worker_timeout_seconds"],
+                } if dynamic_team else None),
+                on_event=observe)
             if (requested_skill.startswith("portfolio-")
                     or requested_skill == "homepage-orchestrator"):
                 from .homepage_artifacts import job_result_artifact, validate_artifact

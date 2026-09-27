@@ -398,6 +398,34 @@ def test_agent_orchestration_modes_are_normalized(agent_store):
                           "orchestration": {"mode": "flow"}})
 
 
+def test_dynamic_team_settings_are_bounded(agent_store):
+    saved = agent_store.save({
+        "id": "dynamic-ca", "name": "Dynamic CA",
+        "orchestration": {
+            "mode": "external_agent", "provider": "customer-agent",
+            "connection": {"base_url": "http://127.0.0.1:3000"},
+            "selection": {"model_id": "profile-1"},
+            "dynamic_team": {"enabled": True, "max_workers": 8,
+                             "max_parallel": 4,
+                             "worker_timeout_seconds": 1200},
+        },
+    })
+    assert saved["orchestration"]["dynamic_team"] == {
+        "enabled": True, "max_workers": 8, "max_parallel": 4,
+        "worker_timeout_seconds": 1200,
+    }
+    with pytest.raises(ValueError, match="不能超过"):
+        agent_store.save({
+            "id": "bad-dynamic", "name": "Bad",
+            "runtime": "customer-agent",
+            "orchestration": {"mode": "external_agent",
+                              "selection": {"model_id": "p"},
+                              "dynamic_team": {"enabled": True,
+                                               "max_workers": 2,
+                                               "max_parallel": 3}},
+        })
+
+
 def test_default_agents_are_loaded_from_config_without_ca_agent_ids():
     from flow_studio.agent_defaults import load_default_agents
 
