@@ -1,0 +1,22 @@
+src/flow_studio/governance.py
+  h_86bb4e0e04237b 265-272
+src/flow_studio/server.py
+  h_86bb4e0e04237b 11-12,179,186-195,387-421
+src/flow_studio/web/app.js
+  h_86bb4e0e04237b 3648-3660,3665,3670
+src/flow_studio/web/index.html
+  h_86bb4e0e04237b 186
+tests/test_flow_server.py
+  h_86bb4e0e04237b 250-281
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "22cc7dadc548b828e29856a8a666b730b5cda223",
+  "prompts": {},
+  "humans": {
+    "h_86bb4e0e04237b": {
+      "author": "caoqu <qu.cao@ly.com>"
+    }
+  }
+}
