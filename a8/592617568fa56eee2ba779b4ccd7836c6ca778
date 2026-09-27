@@ -1,0 +1,21 @@
+src/flow_studio/homepage_artifacts.py
+  s_0b7ae78449458f::t_e1110e761ab97f 79-93,104-111
+tests/test_homepage_flow.py
+  s_0b7ae78449458f::t_e1110e761ab97f 445-481
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a8592617568fa56eee2ba779b4ccd7836c6ca778",
+  "prompts": {},
+  "sessions": {
+    "s_0b7ae78449458f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c83e-853b-7bb0-9e86-8c1ea79b5d36",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "无敌就是寂寞 <qu.cao@ly.com>"
+    }
+  }
+}
